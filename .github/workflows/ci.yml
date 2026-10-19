@@ -51,6 +51,9 @@ jobs:
     uses: rob-c/xrd-devtools/.github/workflows/package.yml@main
     with:
       package: xrdsec
+      # Every public module is imported from the installed wheel:
+      # xrdsec.testing.fixtures is a pytest plugin.
+      extras: testing
       packages: xrdcore
       xrdcore-ref: ${{ inputs.xrdcore-ref || 'main' }}
       devtools-ref: ${{ inputs.devtools-ref || 'main' }}
