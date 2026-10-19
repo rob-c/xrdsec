@@ -241,6 +241,8 @@ xrdclient's own types, so the clients re-export it rather than wrap it.
 - Typed (`py.typed`, checked with `mypy --strict`); Python 3.11 to 3.14 on
   Linux and macOS.
 - Runtime dependencies: `xrdcore`, `cryptography` and `asn1crypto` only.
+- Optional `testing` extra: pytest, for the `testing.fixtures` pytest plugin
+  only; nothing else of xrdsec imports pytest.
 - Optional `krb5` extra: python-gssapi (`gssapi>=1.12,<2`), for
   `krb5.gss` only; nothing imports it until a GSS context is made. The
   pure-Python Kerberos client needs nothing beyond the runtime

@@ -24,6 +24,9 @@ jobs:
         with:
           package: xrdsec
           check-dist: true
+          # Every public module is imported from the installed wheel, and
+          # xrdsec.testing.fixtures is a pytest plugin.
+          extras: testing
 
   # Trusted publishing ties PyPI's trust to this job of this workflow, so the
   # upload stays here, in a job that only downloads what the build staged.

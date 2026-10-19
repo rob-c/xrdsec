@@ -52,6 +52,9 @@ Changelog = "https://github.com/rob-c/xrdsec/blob/main/CHANGELOG.md"
 # Linux source builds need Kerberos development headers and a C compiler.
 # The pure-Python Kerberos client (xrdsec.krb5.client) needs none of it.
 krb5 = ["gssapi>=1.12,<2"]
+# The pytest plugin xrdsec.testing.fixtures, which a suite loads with
+# pytest_plugins; nothing else of xrdsec needs pytest.
+testing = ["pytest>=8"]
 dev = [
   "build>=1,<2",
   # tests/test_scorecard.py: xrd-devtools' scorecard gate measures with these.
