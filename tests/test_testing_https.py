@@ -293,11 +293,16 @@ def _slow_server(release: threading.Event, done: threading.Event, join_timeout: 
 
 
 def _send_without_reading(srv: FakeHTTPSServer) -> http.client.HTTPConnection:
-    """A request sent and left unanswered, once its handler is known to be running."""
+    """A request sent and left unanswered, once its handler is known to be running.
+
+    The server logs ``/slow`` on the handler's thread before it is routed, so
+    that thread exists from then on; any earlier request the test made is
+    not a sign of it.
+    """
     conn = http.client.HTTPConnection(*srv.address, timeout=5)
     conn.request("GET", "/slow")
     deadline = time.monotonic() + 5
-    while not srv.requests and time.monotonic() < deadline:
+    while not any(r.path == "/slow" for r in srv.requests) and time.monotonic() < deadline:
         time.sleep(0.01)
     return conn
 
@@ -307,23 +312,21 @@ def test_stop_joins_connection_threads_when_asked() -> None:
     release, done = threading.Event(), threading.Event()
     srv = _slow_server(release, done, join_timeout=10.0)
     assert _ask(srv, target="/nowhere")[0] == 404  # an earlier, finished thread is pruned
-    conn = _send_without_reading(srv)
-    threading.Timer(0.2, release.set).start()
-    srv.stop()
-    assert done.is_set()
-    conn.close()
+    with contextlib.closing(_send_without_reading(srv)):
+        threading.Timer(0.2, release.set).start()
+        srv.stop()
+        assert done.is_set()
 
 
 def test_stop_gives_up_on_a_handler_after_the_timeout() -> None:
     release, done = threading.Event(), threading.Event()
     srv = _slow_server(release, done, join_timeout=0.05)
-    conn = _send_without_reading(srv)
-    started = time.monotonic()
-    srv.stop()
-    assert time.monotonic() - started < 4 and not done.is_set()
-    release.set()
-    assert done.wait(5)
-    conn.close()
+    with contextlib.closing(_send_without_reading(srv)):
+        started = time.monotonic()
+        srv.stop()
+        assert time.monotonic() - started < 4 and not done.is_set()
+        release.set()
+        assert done.wait(5)
 
 
 # -- going silent ---------------------------------------------------------------------------
