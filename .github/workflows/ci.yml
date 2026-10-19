@@ -1,0 +1,64 @@
+name: CI
+
+# Every gate is one of xrd-devtools' reusable workflows (rob-c/xrd-devtools,
+# .github/workflows): the same steps in every repository of the chain, each
+# reading its configuration from this repository's pyproject.toml. Until the
+# libraries are on PyPI, every job tests against the coordinated candidates
+# (xrd-devtools' candidates action); publish.yml then validates the wheel
+# against the released libraries its dependency ranges resolve to.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      xrdcore-ref:
+        description: "rob-c/xrdcore branch, tag or commit to test against"
+        default: main
+      devtools-ref:
+        description: "rob-c/xrd-devtools ref whose gates and tools run"
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ruff, mypy --strict, complexipy, the take-over scorecard and the
+  # configuration conformance check.
+  static:
+    uses: rob-c/xrd-devtools/.github/workflows/static.yml@main
+    with:
+      packages: xrdcore
+      xrdcore-ref: ${{ inputs.xrdcore-ref || 'main' }}
+      devtools-ref: ${{ inputs.devtools-ref || 'main' }}
+
+  # The suite at 100 % line and branch, Linux and macOS, Python 3.11-3.14.
+  test:
+    uses: rob-c/xrd-devtools/.github/workflows/tests.yml@main
+    with:
+      packages: xrdcore
+      xrdcore-ref: ${{ inputs.xrdcore-ref || 'main' }}
+      devtools-ref: ${{ inputs.devtools-ref || 'main' }}
+
+  # Every dependency from a wheel: a user on a supported platform must never
+  # need a compiler. The wheel holds only the package and imports every
+  # public module in a clean environment.
+  package:
+    uses: rob-c/xrd-devtools/.github/workflows/package.yml@main
+    with:
+      package: xrdsec
+      packages: xrdcore
+      xrdcore-ref: ${{ inputs.xrdcore-ref || 'main' }}
+      devtools-ref: ${{ inputs.devtools-ref || 'main' }}
+
+  # No function duplicated across the chain; every repository's configuration
+  # is the standard. This commit stands in for xrdsec's main.
+  chain:
+    uses: rob-c/xrd-devtools/.github/workflows/chain.yml@main
+    with:
+      xrdsec-ref: ${{ github.sha }}
+      devtools-ref: ${{ inputs.devtools-ref || 'main' }}
