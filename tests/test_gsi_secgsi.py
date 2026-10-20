@@ -12,6 +12,7 @@ would check them. xrdclient's interop suite gives a real server the last word.
 from __future__ import annotations
 
 import dataclasses
+import socket
 import struct
 import time
 from pathlib import Path
@@ -860,6 +861,132 @@ def test_srvnames_come_from_the_stock_variable(monkeypatch):
     assert secgsi.server_names() == ("a.example.org", "*.cern.ch")
     monkeypatch.delenv("XrdSecGSISRVNAMES")
     assert secgsi.server_names() == ()
+
+
+def _resolving(
+    proxy: ProxyCredential, pki: _Pki, names: tuple[str, ...], *, host: str = "alias.example.net"
+) -> SecgsiClient:
+    check = ServerCheck(host, pki.ca_path, resolve=lambda: names)
+    return SecgsiClient(proxy, server_version=10400, server_check=check)
+
+
+def test_a_name_dns_gives_the_host_is_accepted(pki, proxy, caplog):
+    """A round-robin alias whose node holds a certificate in its own name (CNAF)."""
+    client = _resolving(proxy, pki, ("other.example.org", "srv.example.org"))
+    client.initial()
+    with caplog.at_level("DEBUG", "xrdsec"):
+        reply = client.step(signed_challenge(pki))
+    assert decode_message(_present(reply))[0] == STEP_CLIENT_CERT
+    assert "alias.example.net proved to be srv.example.org, its name in DNS" in caplog.text
+
+
+def test_a_server_only_dns_names_is_logged_in_to_but_not_delegated_to(
+    pki, delegating_proxy, caplog
+):
+    """Stock XrdSecgsi: "proxy delegation forbidden when trusting DNS"."""
+    check = ServerCheck("alias.example.net", pki.ca_path, resolve=lambda: ("srv.example.org",))
+    client = SecgsiClient(
+        delegating_proxy,
+        server_version=10400,
+        delegation=Delegation(True, "alias.example.net", pki.ca_path),
+        server_check=check,
+    )
+    client.initial()
+    with caplog.at_level("WARNING", "xrdsec"):
+        client.step(signed_challenge(pki))
+    assert not client._may_delegate
+    assert "only DNS names it in its certificate" in caplog.text
+
+
+def test_a_server_that_names_itself_is_still_delegated_to(pki, delegating_proxy):
+    check = ServerCheck("srv.example.org", pki.ca_path, resolve=lambda: pytest.fail("asked"))
+    client = SecgsiClient(
+        delegating_proxy,
+        server_version=10400,
+        delegation=Delegation(True, "srv.example.org", pki.ca_path),
+        server_check=check,
+    )
+    client.initial()
+    client.step(signed_challenge(pki))
+    assert client._may_delegate
+
+
+def test_dns_names_that_the_certificate_does_not_carry_are_refused(pki, proxy):
+    client = _resolving(proxy, pki, ("other.example.org",))
+    client.initial()
+    with pytest.raises(CredentialError) as refused:
+        client.step(signed_challenge(pki))
+    assert "alias.example.net did not prove its identity" in str(refused.value)
+    assert "(nor for other.example.org, its name in DNS)" in str(refused.value)
+
+
+def test_dns_is_asked_only_when_the_name_does_not_match(pki, proxy):
+    check = ServerCheck("srv.example.org", pki.ca_path, resolve=lambda: pytest.fail("asked"))
+    client = SecgsiClient(proxy, server_version=10400, server_check=check)
+    client.initial()
+    assert decode_message(_present(client.step(signed_challenge(pki))))[0] == STEP_CLIENT_CERT
+
+
+def test_dns_widens_only_the_name_not_the_chain(pki, proxy, tmp_path):
+    check = ServerCheck("alias.example.net", str(tmp_path), resolve=lambda: ("srv.example.org",))
+    client = SecgsiClient(proxy, server_version=10400, server_check=check)
+    client.initial()
+    with pytest.raises(CredentialError, match=r"nor for srv\.example\.org, its name in DNS"):
+        client.step(signed_challenge(pki))
+
+
+@pytest.mark.parametrize(
+    ("value", "trusted"), [(None, True), ("1", True), ("yes", True), ("0", False), (" 0 ", False)]
+)
+def test_trustdns_is_the_stock_variable_and_on_by_default(monkeypatch, value, trusted):
+    if value is None:
+        monkeypatch.delenv("XrdSecGSITRUSTDNS", raising=False)
+    else:
+        monkeypatch.setenv("XrdSecGSITRUSTDNS", value)
+    assert secgsi.trust_dns() is trusted
+
+
+def _fake_dns(
+    monkeypatch: pytest.MonkeyPatch, forward: dict[str, list[str]], reverse: dict[str, str]
+) -> None:
+    def getaddrinfo(host: str, port: object, *args: object, **kwargs: object) -> list[Any]:
+        if host not in forward:
+            raise socket.gaierror(socket.EAI_NONAME, "no such host")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, 0)) for a in forward[host]]
+
+    def gethostbyaddr(address: str) -> tuple[str, list[str], list[str]]:
+        if address not in reverse:
+            raise socket.herror(1, "no PTR")
+        return (reverse[address], [], [address])
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket, "gethostbyaddr", gethostbyaddr)
+
+
+def test_dns_names_are_the_confirmed_ptr_names_of_every_address(monkeypatch):
+    forward = {
+        "alias.example.org": ["192.0.2.2", "192.0.2.1", "192.0.2.3", "192.0.2.4"],
+        "node1.example.org": ["192.0.2.1"],
+        "node2.example.org": ["192.0.2.2"],
+        "liar.example.com": ["198.51.100.9"],
+        "twin.example.org": ["192.0.2.4"],
+    }
+    reverse = {
+        "192.0.2.1": "Node1.Example.org.",
+        "192.0.2.2": "node2.example.org",
+        "192.0.2.3": "liar.example.com",  # does not resolve back: refused
+        "192.0.2.4": "node1.example.org",  # does not resolve back to .4 either
+    }
+    _fake_dns(monkeypatch, forward, reverse)
+    assert secgsi.dns_names("alias.example.org") == ("node1.example.org", "node2.example.org")
+
+
+def test_dns_names_of_an_unknown_host_or_address_are_none(monkeypatch):
+    _fake_dns(monkeypatch, {"bare.example.org": ["192.0.2.7"]}, {})
+    assert secgsi.dns_names("nowhere.example.org") == ()
+    assert secgsi.dns_names("bare.example.org") == ()
+    _fake_dns(monkeypatch, {"a.example.org": ["192.0.2.8"]}, {"192.0.2.8": "gone.example.org"})
+    assert secgsi.dns_names("a.example.org") == ()
 
 
 def test_a_server_verified_at_login_is_trusted_with_a_proxy(pki, delegating_proxy, monkeypatch):

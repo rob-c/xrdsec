@@ -70,6 +70,7 @@ from .der import (
     TAG_BOOLEAN,
     TAG_INTEGER,
     TAG_OCTET_STRING,
+    TAG_OID,
     TAG_SEQUENCE,
     DERError,
     Element,
@@ -257,12 +258,41 @@ def _requested_extensions(extras: list[bytes]) -> list[Extension]:
 
 
 def _extension_list(values: Element) -> list[Extension]:
-    """``SET OF Extensions``: each value is itself a ``SEQUENCE OF Extension``."""
-    return [
-        parse_extension(raw)
-        for value in values.children()
-        for raw in raw_children(encode(value.tag, value.value))
-    ]
+    """``SET OF Extensions``: each value is a ``SEQUENCE OF Extension`` - or, from dCache, one.
+
+    RFC 2985's ``extensionRequest`` wraps the extensions in a ``SEQUENCE OF``
+    inside the ``SET``, as XrdCrypto and OpenSSL write it. dCache's GSI door
+    (canl) puts a single ``Extension`` straight into the ``SET`` instead: a
+    member whose first child is an OID is that extension itself. Stock
+    XRootD clients sign dCache's requests, so this one must read them too, or
+    no proxy is ever delegated to a dCache site.
+    """
+    out: list[Extension] = []
+    for value in values.children():
+        members = value.children()
+        if members and members[0].tag == TAG_OID:
+            out.append(_requested_extension(value))
+        else:
+            out.extend(_requested_extension(member) for member in members)
+    return out
+
+
+def _requested_extension(element: Element) -> Extension:
+    """One requested ``Extension``, its value in an OCTET STRING or - from dCache - not.
+
+    X.509 puts ``extnValue`` in an OCTET STRING whose contents are the
+    extension's DER; dCache's requests carry that DER bare (``SEQUENCE``
+    where the OCTET STRING should be). Read bare, the value is the same
+    bytes the OCTET STRING would have held, so the extension means what it
+    says either way. Anything else malformed is still refused.
+    """
+    raw = encode(element.tag, element.value)
+    parts = element.children()
+    if len(parts) in (2, 3) and parts[0].tag == TAG_OID and parts[-1].tag == TAG_SEQUENCE:
+        critical = len(parts) == 3 and parts[1].tag == TAG_BOOLEAN and parts[1].value != b"\x00"
+        value = encode(parts[-1].tag, parts[-1].value)
+        return Extension(oid_string(parts[0]), critical, value, raw)
+    return parse_extension(raw)
 
 
 def proxy_path_length(extension: Extension) -> int | None:

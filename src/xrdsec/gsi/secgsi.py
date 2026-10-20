@@ -40,7 +40,9 @@ it is, as ``XrdSecgsi`` clients do: before the proxy chain is sent, the
 certificate in ``kXGS_cert`` must chain to a CA in the certificate directory
 and name the host that was dialled, or match one of the patterns in
 ``$XrdSecGSISRVNAMES`` (comma-separated, ``*`` and ``?`` wildcards; for a
-server whose certificate carries an alias). A client may turn that off for a
+server whose certificate carries an alias), or - unless
+``$XrdSecGSITRUSTDNS=0``, as in the stock client - name the machine DNS says
+is behind the host (:func:`dns_names`). A client may turn that off for a
 broken test setup by building :class:`SecgsiClient` without a
 :class:`ServerCheck`; delegation still checks, and still refuses an
 unverified server.
@@ -69,8 +71,11 @@ from __future__ import annotations
 
 import binascii
 import fnmatch
+import ipaddress
 import os
+import socket
 import struct
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from xrdcore.errors import CredentialError
@@ -121,6 +126,7 @@ __all__ = [
     "choose_digest",
     "client_ca_hashes",
     "decode_message",
+    "dns_names",
     "encode_message",
     "encode_public_blob",
     "find_bucket",
@@ -130,6 +136,7 @@ __all__ = [
     "seal",
     "server_names",
     "session_key",
+    "trust_dns",
     "unseal",
 ]
 
@@ -705,10 +712,61 @@ class ServerCheck:
     ca_path: str | None = None
     names: tuple[str, ...] = ()
     bypass: str = ""
+    #: The names DNS gives the host's addresses (:func:`dns_names`), asked
+    #: for only when the certificate names neither the host nor an allowed
+    #: alias - stock ``XrdSecgsi``'s ``XrdSecGSITRUSTDNS``. ``None`` trusts
+    #: no DNS name, as ``XrdSecGSITRUSTDNS=0`` does.
+    resolve: Callable[[], Sequence[str]] | None = None
 
 
 #: The stock client's variable, mixed case as XRootD spells it.
 _SRVNAMES_VARIABLE = "XrdSecGSISRVNAMES"
+
+#: Whether DNS names a server, stock ``XrdSecgsi``'s variable (default on).
+_TRUSTDNS_VARIABLE = "XrdSecGSITRUSTDNS"
+
+
+def trust_dns() -> bool:
+    """Whether ``$XrdSecGSITRUSTDNS`` lets DNS name the server: on unless it is ``0``.
+
+    The stock client's default. A DNS alias that round-robins over data
+    servers each holding a certificate in its own name (CNAF's
+    ``xrootd-lhcb.cr.cnaf.infn.it``) only passes the check this way.
+    """
+    return os.environ.get(_TRUSTDNS_VARIABLE, "1").strip() != "0"
+
+
+def dns_names(host: str) -> tuple[str, ...]:
+    """The forward-confirmed reverse-DNS names of every address ``host`` resolves to.
+
+    What stock ``XrdSecgsi`` checks a certificate against when it trusts
+    DNS: the name of the machine behind the alias. Each name must resolve
+    back to the address it was found for, so a reverse zone alone cannot
+    name a host it does not serve. An IP literal is looked up the same way.
+    Lookup failures yield nothing rather than raising: the check then fails
+    with the reason the certificate gave.
+    """
+    try:
+        addresses = {str(info[4][0]) for info in socket.getaddrinfo(host, None)}
+    except OSError:
+        return ()
+    found: list[str] = []
+    for address in sorted(addresses):
+        name = _confirmed_name(address)
+        if name and name not in found:
+            found.append(name)
+    return tuple(found)
+
+
+def _confirmed_name(address: str) -> str:
+    """``address``'s PTR name when that name resolves back to ``address``; else ``""``."""
+    try:
+        name = socket.gethostbyaddr(address)[0].rstrip(".").lower()
+        forward = {str(info[4][0]) for info in socket.getaddrinfo(name, None)}
+    except OSError:
+        return ""
+    wanted = ipaddress.ip_address(address)
+    return name if any(ipaddress.ip_address(a) == wanted for a in forward) else ""
 
 
 def server_names() -> tuple[str, ...]:
@@ -732,24 +790,52 @@ def _expected_name(chain_pem: bytes, check: ServerCheck) -> str:
     return check.host
 
 
-def check_server(chain_pem: bytes, check: ServerCheck) -> None:
+def _dns_name_for(chain_pem: bytes, check: ServerCheck) -> tuple[bool, tuple[str, ...]]:
+    """Whether the certificate is good for a name DNS gives the host, and the names tried.
+
+    ``XrdSecGSITRUSTDNS``: only the name is widened - the chain, the CA and
+    the validity are checked in full against each DNS name in turn.
+    """
+    if check.resolve is None:
+        return False, ()
+    names = tuple(check.resolve())
+    for name in names:
+        try:
+            verify_server(chain_pem, name, check.ca_path)
+        except TrustError:
+            continue
+        _log.debug("the GSI server %s proved to be %s, its name in DNS", check.host, name)
+        return True, names
+    return False, names
+
+
+def check_server(chain_pem: bytes, check: ServerCheck) -> bool:
     """Refuse a server whose certificate does not establish that it is ``check.host``.
 
     The login-time check ``XrdSecgsi`` makes: the certificate must chain to a
     CA in ``check.ca_path`` (:func:`xrdsec.trust.verify_server`),
-    be current, and name the host - or an alias ``check.names`` allows.
+    be current, and name the host - or an alias ``check.names`` allows, or a
+    name DNS gives the host (``check.resolve``). Returns whether it named the
+    host or an alias itself; ``False`` means only DNS vouched for it, and
+    then - as the stock client refuses with "proxy delegation forbidden when
+    trusting DNS" - no proxy may be delegated to it.
     Raises :class:`~xrdcore.errors.CredentialError` saying which check failed
     and how to get past a setup that cannot pass it.
     """
     try:
         verify_server(chain_pem, _expected_name(chain_pem, check), check.ca_path)
     except TrustError as exc:
+        named, tried = _dns_name_for(chain_pem, check)
+        if named:
+            return False
         bypass = f"; on a test setup only, {check.bypass} skips the check" if check.bypass else ""
+        dns = f" (nor for {', '.join(tried)}, its name in DNS)" if tried else ""
         raise CredentialError(
-            f"the GSI server {check.host} did not prove its identity: {exc}. "
+            f"the GSI server {check.host} did not prove its identity: {exc}{dns}. "
             "Check $X509_CERT_DIR holds its CA; for a certificate issued to another "
             f"name, list that name in $XrdSecGSISRVNAMES{bypass}"
         ) from exc
+    return True
 
 
 def _modules(cryptomod: str) -> tuple[str, bool]:
@@ -774,6 +860,7 @@ class SecgsiClient:
     """
 
     __slots__ = (
+        "_dns_only",
         "_may_delegate",
         "_rtag",
         "_session",
@@ -813,6 +900,8 @@ class SecgsiClient:
         self._rtag = b""
         self._session: Session | None = None
         self._may_delegate = False
+        #: Set when only DNS named the server at login (see :meth:`_verify`).
+        self._dns_only = False
 
     @property
     def identity(self) -> str:
@@ -839,7 +928,7 @@ class SecgsiClient:
                 f"{-self.proxy.remaining() / 3600:.1f} hours ago; renew it"
             )
         self._rtag = os.urandom(RTAG_LEN)
-        self._session, self._may_delegate = None, False
+        self._session, self._may_delegate, self._dns_only = None, False, False
         return build_certreq(
             cryptomod=self.cryptomod + ("" if self.padded or not self.signed else NOPAD),
             version=VERSION_SIGNED_DH if self.signed else VERSION_UNSIGNED_DH,
@@ -879,7 +968,7 @@ class SecgsiClient:
             message, self._session = answer_certificate(
                 challenge, self.proxy.pem(), self._key(), padded=self.padded
             )
-            self._may_delegate = self._offers() and (verified or self._trusted(self._session))
+            self._may_delegate = self._offers() and (verified or self._delegable(self._session))
             return message
         if step == STEP_SERVER_PXYREQ:
             if self._session is None:
@@ -890,11 +979,29 @@ class SecgsiClient:
         raise CredentialError(f"unexpected GSI step {step} from the server")
 
     def _verify(self, challenge: bytes) -> bool:
-        """Check the server before anything is sent to it; whether a check was made."""
+        """Check the server before anything is sent to it; whether it is fit to delegate to.
+
+        ``False`` when no check was made - :meth:`_trusted` decides then - and
+        when only DNS named the server: that login goes ahead, but no proxy
+        is delegated to it, which the stock client also forbids.
+        """
         if self.server_check is None:
             return False
-        check_server(find_bucket(challenge, BUCKET_X509) or b"", self.server_check)
-        return True
+        if check_server(find_bucket(challenge, BUCKET_X509) or b"", self.server_check):
+            return True
+        self._dns_only = True
+        return False
+
+    def _delegable(self, session: Session) -> bool:
+        """Whether a server the login check did not settle may be delegated to."""
+        if self._dns_only:
+            _log.warning(
+                "not delegating the X.509 proxy to %s: only DNS names it in its "
+                "certificate, and a proxy is not delegated on DNS's word",
+                self.server_check.host if self.server_check else self.delegation.host,
+            )
+            return False
+        return self._trusted(session)
 
     def _trusted(self, session: Session) -> bool:
         """Whether the server proved to be the host it was dialled as."""

@@ -13,9 +13,10 @@ Three things make it GSI rather than plain TLS, and all are here:
 * **the turn.** Under TLS 1.3 the client finishes the handshake first, so a
   Globus acceptor (globus-gridftp-server, CGSI-gSOAP) answers the client's
   Finished with one encrypted zero byte (:data:`TURN`), and the client sends
-  nothing more until it has read it. dCache's own GSI engine (its dcap and
-  SRM doors) sends no turn and reads the flag at once; ``turn=False`` speaks
-  to it.
+  nothing more until it has read it. dCache's own GSI engine (its dcap,
+  SRM and GridFTP doors) sends no turn and reads the flag at once;
+  ``turn=False`` speaks to it, and a client left expecting a turn sends the
+  flag anyway once the acceptor answers without one (session tickets only).
 * **the delegation byte.** Then the client sends one encrypted byte: ``0``
   for no delegation, ``D`` to delegate. After ``D`` the server sends a
   certificate request, and the client answers with the proxy it has signed -
@@ -255,8 +256,11 @@ class SecurityContext:
             self._in.write(token)
         if self._state == "handshake":
             self._handshake()
+            # The token that finished the handshake was spent on it, not on
+            # the turn: only a later one can say the acceptor gives none.
+            token = b"" if self._state == "turn" else token
         if self._state != "handshake":
-            self._after_handshake()
+            self._after_handshake(spoke=bool(token))
         return self._out.read()
 
     def _handshake(self) -> None:
@@ -288,18 +292,26 @@ class SecurityContext:
         self._state = "request" if self.delegate is not None else "done"
         self.complete = self.delegate is None
 
-    def _after_handshake(self) -> None:
+    def _after_handshake(self, *, spoke: bool = False) -> None:
         """Feed decrypted bytes through the post-handshake states, as far as they go.
 
         The ``if`` chain (not ``elif``) is deliberate: one batch of bytes can
         carry the turn and the request together, and each state consumes
         only its own prefix of ``_pending``.
+
+        ``spoke`` says the acceptor sent a token this round. In the ``turn``
+        state, a token that holds no application byte is an acceptor that
+        gives no turn: dCache's GSI engine (its GridFTP door too) answers the
+        client's Finished with TLS 1.3 session tickets alone and waits for
+        the flag, where a Globus acceptor sends its tickets and the turn in
+        that same reply. Waiting on would deadlock, so the flag goes now.
         """
         self._pending += self._drain()
         if self._state == "turn":
-            if not self._pending:
-                return  # the acceptor has not handed the turn back yet
-            self._pending = self._pending[1:]  # the TURN byte; its value is not checked
+            if not self._pending and not spoke:
+                return  # the acceptor has not answered yet
+            # The TURN byte, when there is one; its value is not checked.
+            self._pending = self._pending[1:]
             self._send_flag()
         if self._state == "flag" and self._pending:
             self._read_flag()

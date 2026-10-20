@@ -49,6 +49,7 @@ import base64
 import contextlib
 import textwrap
 import time
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, cast
@@ -58,6 +59,7 @@ from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
 from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
+from cryptography.utils import CryptographyDeprecationWarning
 
 from .credentials import default_proxy_path
 from .der import (
@@ -352,6 +354,33 @@ class CertificateData(Certificate):
     signature: bytes = field(default=b"", repr=False)
     signature_oid: str = ""
     spki: bytes = field(default=b"", repr=False)
+
+
+#: cryptography's deprecation of a zero or negative serial, which RFC 5280
+#: forbids and several IGTF CAs still carry - in their own serial, or as the
+#: issuer serial an Authority Key Identifier names. Every grid client loads
+#: those CAs, so every command printed the warning three times.
+SERIAL_WARNING = r"Parsed a serial number which wasn't positive"
+
+
+def quiet_serial_warning() -> None:
+    """Ignore :data:`SERIAL_WARNING` when it is raised from this package's own calls.
+
+    Installed once, at import: ``warnings.catch_warnings`` around each load
+    would swap the process's filters under other threads. Scoped to the one
+    message and to ``xrdsec`` modules, so the same warning from a caller's
+    own code still shows. When ``cryptography`` refuses such certificates
+    outright, :func:`certificate_data`'s ``ValueError`` fallback reads them.
+    """
+    warnings.filterwarnings(
+        "ignore",
+        message=SERIAL_WARNING,
+        category=CryptographyDeprecationWarning,
+        module=r"xrdsec\.",
+    )
+
+
+quiet_serial_warning()
 
 
 def _library_name(name: _x509.Name) -> Name:

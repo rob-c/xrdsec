@@ -258,6 +258,36 @@ def test_dcache_style_peers_take_no_turn(pki: PKI) -> None:
     assert server.unwrap(client.wrap(b"hello")) == b"hello"
 
 
+@pytest.mark.skipif(not ssl.HAS_TLSv1_3, reason="this Python's ssl module has no TLS 1.3")
+@pytest.mark.parametrize("delegate", [True, False])
+def test_a_client_expecting_the_turn_still_talks_to_a_dcache_peer(pki: PKI, delegate: bool) -> None:
+    """dCache's GridFTP door answers the client's Finished with session tickets only.
+
+    A client built with the default ``turn=True`` cannot know in advance
+    which kind of acceptor it has; once one answers with no turn in it, the
+    flag goes out rather than the exchange deadlocking (SARA, 2026-10-20).
+    """
+    client = SecurityContext(client_tls(pki), delegate=pki.credential() if delegate else None)
+    server = SecurityContext(
+        pki.server_context(), server_side=True, delegation_key=key(4), turn=False
+    )
+    exchange_tokens(client, server)
+    assert client.tls.version() == "TLSv1.3"
+    assert client.complete and server.complete
+    assert (server.delegated is not None) is delegate
+    assert server.unwrap(client.wrap(b"hello")) == b"hello"
+
+
+@pytest.mark.skipif(not ssl.HAS_TLSv1_3, reason="this Python's ssl module has no TLS 1.3")
+def test_a_client_waits_for_the_turn_while_the_acceptor_is_silent(pki: PKI) -> None:
+    client = SecurityContext(client_tls(pki))
+    server = SecurityContext(pki.server_context(), server_side=True)
+    token = server.step(client.step())
+    client.step(token)
+    assert client._state == "turn"
+    assert client.step() == b"" and client._state == "turn"  # nothing from the acceptor yet
+
+
 # -- peer_chain_der, the 3.11/3.12 bridge (moved from xgfalclient's _compat) --------
 
 

@@ -710,3 +710,45 @@ def test_tbs_extensions_skip_what_is_not_an_extension():
         ),
     ]
     assert tbs_extensions(oddities) == {"1.2.4": (False, b"v"), "1.2.5": (False, b"w")}
+
+
+def _ca_with_serial(key, serial: int) -> bytes:
+    from xrdsec.testing.rawpki import make_certificate_with
+
+    ca = name((CN, "Old CA"))
+    return make_certificate_with(ca, ca, key.public, key, (), serial=serial)
+
+
+@pytest.mark.parametrize("serial", [0, -1, -(1 << 70)])
+def test_a_ca_with_a_serial_rfc_5280_forbids_loads_quietly(key, serial):
+    """Some IGTF CAs have one; ``cryptography`` warns on every load of them."""
+    import warnings
+
+    from xrdsec import x509 as module
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        module.quiet_serial_warning()  # what import did, ahead of pytest's "error"
+        data = certificate_data(_ca_with_serial(key, serial))
+    assert data.serial == serial
+    assert [str(w.message) for w in caught] == []
+
+
+def test_the_serial_warning_is_ignored_only_from_this_package(key):
+    import warnings
+
+    from cryptography.utils import CryptographyDeprecationWarning
+
+    from xrdsec import x509 as module
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        module.quiet_serial_warning()
+        warnings.warn_explicit(
+            "Parsed a serial number which wasn't positive (i.e., it was negative or zero)",
+            CryptographyDeprecationWarning,
+            "caller.py",
+            1,
+            module="caller",
+        )
+    assert len(caught) == 1

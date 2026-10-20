@@ -3,6 +3,36 @@
 Notable user-visible changes are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - Unreleased
+
+Fixes found moving data between the LHCb Tier-1 and Tier-2 storage elements
+with xrdclient and xgfalclient (2026-10-20).
+
+### Fixed
+
+- A GSI proxy request from a dCache door is now read and signed. dCache puts
+  a single `Extension` straight into the `extensionRequest` `SET` (no
+  `SEQUENCE OF`) and the value as a bare `SEQUENCE` (no OCTET STRING); the
+  parser refused it, so no proxy was ever delegated to a dCache site and
+  root third-party copy through GRIDKA, IN2P3, PIC or SARA failed.
+  Anything else malformed is still refused.
+- The GSI server check trusts DNS as stock `XrdSecgsi` does
+  (`XrdSecGSITRUSTDNS`, on by default; `trust_dns()`): a certificate that
+  names neither the host nor a `$XrdSecGSISRVNAMES` pattern is checked
+  against the forward-confirmed reverse-DNS names of the host's addresses
+  (`dns_names()`, `ServerCheck.resolve`, asked only after a mismatch). A
+  round-robin alias whose nodes hold certificates in their own names (CNAF's
+  `xrootd-lhcb.cr.cnaf.infn.it`) failed on every other login. As in the
+  stock client, a proxy is never delegated to a server only DNS vouched for;
+  `check_server` now returns whether the certificate named the host itself.
+- The GSS client no longer deadlocks against an acceptor that gives no
+  TLS 1.3 turn (dCache's GridFTP door): once the acceptor answers with
+  session tickets only, the delegation flag is sent.
+- Certificates with a zero or negative serial (several IGTF CAs, and any
+  Authority Key Identifier naming one) no longer print `cryptography`'s
+  `CryptographyDeprecationWarning` three times per command; the filter is
+  scoped to xrdsec's own calls and to that one message.
+
 ## [0.4.0] - 2026-10-19
 
 The first release. Until now xrdclient, xgfalclient and xrdarc each carried

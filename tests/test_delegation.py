@@ -317,6 +317,55 @@ def test_requests_without_extensions_or_with_other_attributes_read_as_none(keys)
     assert odd.extensions == ()
 
 
+#: dCache's ``extensionRequest``: one bare ``Extension`` in the ``SET`` (no
+#: ``SEQUENCE OF``), its value a bare ``SEQUENCE`` (no OCTET STRING), and a
+#: limited-proxy policy - the shape a production door sent on 2026-10-20.
+DCACHE_POLICY = sequence(sequence(oid("1.3.6.1.4.1.3536.1.1.1.9")))
+DCACHE_PCI = sequence(oid(PROXY_CERT_INFO_OID), tlv(0x01, b"\xff"), DCACHE_POLICY)
+
+
+def _dcache_request(keys, extension_der: bytes = DCACHE_PCI) -> bytes:
+    requested = sequence(oid("1.2.840.113549.1.9.14"), setof(extension_der))
+    return request_for(keys, attributes=requested)
+
+
+def test_a_dcache_request_is_read_as_the_rfc_one_means(keys):
+    request = load_proxy_request(_dcache_request(keys))
+    [found] = request.extensions
+    assert (found.oid, found.critical) == (PROXY_CERT_INFO_OID, True)
+    assert found.value == DCACHE_POLICY  # what the OCTET STRING would have held
+    assert found.der == DCACHE_PCI
+    assert request.verify()
+
+
+def test_a_dcache_request_is_signed_like_any_other(keys):
+    issued = sign_proxy_request(
+        load_proxy_request(_dcache_request(keys)), signer_proxy(keys), keys[0]
+    )
+    found = x509.extensions_of(issued.der)
+    assert [e.oid for e in found] == ["2.5.29.19", "2.5.29.15", PROXY_CERT_INFO_OID]
+    body = der.parse(found[2].value)[0].children()
+    assert der.oid_string(body[0].children()[0]) == "1.3.6.1.5.5.7.21.1"  # inheritAll
+
+
+def test_a_bare_extension_in_the_set_may_still_wrap_its_value(keys):
+    """Only the missing ``SEQUENCE OF`` is dCache's quirk here: the value is proper."""
+    request = load_proxy_request(_dcache_request(keys, PCI))
+    assert [e.oid for e in request.extensions] == [PROXY_CERT_INFO_OID]
+
+
+@pytest.mark.parametrize(
+    "extension_der",
+    [
+        sequence(oid(PROXY_CERT_INFO_OID), integer(1)),
+        sequence(oid(PROXY_CERT_INFO_OID), tlv(0x01, b"\xff"), integer(1), DCACHE_POLICY),
+    ],
+)
+def test_a_bare_extension_that_is_still_malformed_is_refused(keys, extension_der):
+    with pytest.raises(DelegationError, match="unreadable"):
+        load_proxy_request(_dcache_request(keys, extension_der))
+
+
 def test_a_forged_request_does_not_verify(keys):
     assert not load_proxy_request(request_for(keys, signer=keys[0])).verify()
 
