@@ -34,7 +34,7 @@ classifiers = [
 # Maintained libraries provide the parsing and the cryptography; this
 # package decides only what grid peers expect of them.
 dependencies = [
-  "xrdcore>=0.4.0,<0.5",
+  "xrdcore>=0.4.1,<0.5",
   "asn1crypto>=1.5.1",
   "cryptography>=45",
 ]
