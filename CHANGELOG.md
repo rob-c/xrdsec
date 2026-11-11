@@ -10,6 +10,22 @@ with xrdclient and xgfalclient (2026-10-20).
 
 ### Added
 
+- `xrdsec.token_client`: the WLCG Common JWT Profile's client half, in the
+  standard library and `cryptography` alone - no HEP tooling, nothing new to
+  install. `discover` reads an issuer's OpenID configuration or a resource's
+  `/.well-known/wlcg-token`; `device_authorization`/`device_poll` run RFC 8628's
+  device flow; `acquire` is the profile's "X.509 as the client" (mutual TLS with
+  the certificate from the PKCS#12, no secret and no browser); `exchange` is
+  RFC 8693, for narrowing a broad token to one storage element or path;
+  `verify` checks a JWT's signature against the issuer's published keys and
+  reads `iss`/`aud`/`exp`/`nbf`/`wlcg.ver`/`wlcg.groups`; and
+  `write_token`/`read_token` use the WLCG Bearer Token Discovery locations, so
+  what is written is what every client in the chain already finds.
+- `xrdsec.tokens.token_source`: where the token a session holds actually came
+  from, so a report does not name `$BEARER_TOKEN_FILE` for a token that was in
+  `$BEARER_TOKEN`.
+
+
 - `xrdsec.locations`: the one search order every tool now uses - the
   environment, the machine's own places, the WLCG bundle on CVMFS
   (`/cvmfs/grid.cern.ch/etc/grid-security/...`, then
