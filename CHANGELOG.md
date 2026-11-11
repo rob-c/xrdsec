@@ -5,6 +5,14 @@ Notable user-visible changes are recorded here. This project follows
 
 ## [0.4.1] - Unreleased
 
+### Tested
+
+- Proxy creation from a **PKCS#12 bundle** (no `~/.globus`), VOMS attribute
+  certificates, the four-stage lookup and `xrd-proxy doctor` are exercised end to
+  end on **macOS** (Apple Silicon) against production services: LHCb DIRAC,
+  CERN EOS and the PIC Tier-1. TLS contexts, GSI delegation and the CA/CRL
+  handling are the same code there as on AlmaLinux.
+
 Fixes found moving data between the LHCb Tier-1 and Tier-2 storage elements
 with xrdclient and xgfalclient (2026-10-20).
 
