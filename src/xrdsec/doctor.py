@@ -793,7 +793,8 @@ def _tokens(run: _Run) -> None:
         return
     expiry = tokens.token_expiry(token)
     left = "no expiry to read" if expiry is None else f"{_clock(expiry - run.now)} left"
-    run.add("tokens", "ok", f"a bearer token from {'$BEARER_TOKEN_FILE'}, {left}")
+    source = tokens.token_source(token, environ=run.env)
+    run.add("tokens", "ok", f"a bearer token from {source}, {left}")
 
 
 # ---------------------------------------------------------------------------

@@ -254,3 +254,31 @@ def test_json_nesting_too_deep_for_the_parser_is_no_claims(monkeypatch):
 
     monkeypatch.setattr(json, "loads", too_deep)
     assert tokens.token_claims(f"{_HEADER}.{_segment({'exp': 1})}.sig") == {}
+
+
+def test_a_token_says_where_it_was_found(tmp_path: Path) -> None:
+    """The places a session puts a token, each named the way a report should read."""
+    token = "the-token"
+    assert tokens.token_source(token, environ={"BEARER_TOKEN": token}) == "$BEARER_TOKEN"
+
+    named = tmp_path / "mine"
+    named.write_text(token)
+    environ = {"BEARER_TOKEN_FILE": str(named), "BEARER_TOKEN": "other"}
+    assert tokens.token_source(token, environ=environ) == "$BEARER_TOKEN_FILE"
+
+    runtime = tmp_path / "run"
+    runtime.mkdir()
+    (runtime / "bt_u501").write_text(token + "\n")
+    assert tokens.token_source(token, environ={"XDG_RUNTIME_DIR": str(runtime)}, uid=501) == str(
+        runtime / "bt_u501"
+    )
+
+    assert tokens.token_source(token, environ={}) == "the environment"
+
+
+def test_a_path_that_cannot_be_read_is_not_where_the_token_is(tmp_path: Path) -> None:
+    """A directory where a token file should be is passed over, not reported as the source."""
+    assert tokens._holds(str(tmp_path), "the-token") is False
+    named = tmp_path / "gone"
+    environ = {"BEARER_TOKEN_FILE": str(named)}
+    assert tokens.token_source("the-token", environ=environ, uid=501) == str(named)

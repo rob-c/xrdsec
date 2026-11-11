@@ -57,6 +57,7 @@ __all__ = [
     "token_claims",
     "token_expiry",
     "token_files",
+    "token_source",
     "url_token",
 ]
 
@@ -210,6 +211,42 @@ def token_claims(token: str, *, padding: bool = False) -> dict[str, object]:
     if header.get("b64", True) is False:
         return {}
     return claims
+
+
+def token_source(
+    token: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    uid: int | None = None,
+) -> str:
+    """Where ``token`` was found, worded for a report: the variable, or the file.
+
+    ``$BEARER_TOKEN`` first, then the files the discovery reads in order, each
+    named as the specification names it - ``$BEARER_TOKEN_FILE`` for the file
+    that variable points at, the path for a ``bt_u<uid>``. A report that says
+    ``$BEARER_TOKEN_FILE`` for a token that came from ``$BEARER_TOKEN`` sends
+    a person to look in a file that does not exist.
+    """
+    env = _environ(environ)
+    wanted = token.strip()
+    if (env.get("BEARER_TOKEN") or "").strip() == wanted:
+        return "$BEARER_TOKEN"
+    named = (env.get("BEARER_TOKEN_FILE") or "").strip()
+    for path, _predictable in token_files(environ=env, uid=uid):
+        if path == named:
+            return "$BEARER_TOKEN_FILE" if _holds(path, wanted) else path
+        if _holds(path, wanted):
+            return path
+    return "$BEARER_TOKEN_FILE" if named else "the environment"
+
+
+def _holds(path: str, wanted: str) -> bool:
+    """Whether ``path`` holds exactly ``wanted``, ignoring surrounding whitespace."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip() == wanted
+    except OSError:
+        return False
 
 
 def token_expiry(token: str, *, padding: bool = False) -> float | None:

@@ -596,6 +596,17 @@ def test_a_token_is_described_with_what_is_left(tmp_path: Path, monkeypatch: pyt
     token_file.chmod(0o600)
     sink = run({"BEARER_TOKEN_FILE": str(token_file), "X509_USER_PROXY": str(tmp_path / "x")})
     assert sink.state("tokens") == "ok" and "left" in sink.detail("tokens")
+    assert "$BEARER_TOKEN_FILE" in sink.detail("tokens")
+
+
+def test_a_token_in_the_environment_is_reported_as_having_come_from_there(
+    tmp_path: Path,
+):
+    """Naming the wrong variable sends a person to a file that holds nothing."""
+    token = _jwt({"exp": int(time.time()) + 3600})
+    sink = run({"BEARER_TOKEN": token, "X509_USER_PROXY": str(tmp_path / "x")})
+    assert sink.state("tokens") == "ok"
+    assert "$BEARER_TOKEN," in sink.detail("tokens")
 
 
 def test_a_token_with_no_expiry_is_left_to_the_server(tmp_path: Path):
