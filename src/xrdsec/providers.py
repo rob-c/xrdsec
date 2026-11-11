@@ -9,6 +9,13 @@ endpoint, and the ``client_credentials``, ``device_code`` and
 ``token-exchange`` grants. The ``scope`` a profile suggests comes from that
 issuer's own ``scopes_supported``.
 
+**TLS.** Each issuer's chain was audited on 11 November 2026: the per-experiment
+IAMs at CERN are issued by Sectigo, the WLCG and EGI IAMs by HARICA (GEANT
+TLS), the CILogon tenants by Amazon. All of them verify from the operating
+system's trust store *and* from the IGTF bundle, so token endpoints are
+contacted with both (:func:`xrdsec.token_client._context`) and no public CA
+keys are shipped in this package.
+
 None of this is authoritative. What a *service* accepts is that service's
 ``/.well-known/wlcg-token``; what an issuer calls itself is its own discovery
 document; and **the environment always wins**: ``WLCG_TOKEN_ISSUER``,

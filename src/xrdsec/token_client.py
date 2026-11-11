@@ -168,12 +168,33 @@ class Token:
 
 
 def _context(credential: Any, ca_path: str | None) -> ssl.SSLContext:
-    """A client TLS context that trusts the grid CAs and presents ``credential``, if any."""
+    """A client TLS context for a token endpoint: the **system store and the grid's**.
+
+    A token issuer is a public web service - the per-experiment IAMs at CERN
+    carry Sectigo certificates, the WLCG and EGI IAMs HARICA (GEANT TLS), the
+    CILogon tenants Amazon - so its chain is anchored in the operating
+    system's store, not in the IGTF bundle that signs grid hosts. Trusting only
+    :func:`xrdsec.credentials.grid_ca_path` therefore fails with "certificate
+    verify failed: unable to get local issuer certificate" - on a machine whose
+    grid bundle is absent, stale or simply does not carry those roots.
+
+    ``system_ca=True`` adds the system store *to* whatever grid directory is
+    found, which is what that flag is for; the grid directory is still used, so
+    an IGTF-signed issuer (some sites run one) verifies too. VOMS servers keep
+    the grid-only trust they have always had: they are part of the grid PKI.
+
+    No public CA keys are vendored here. All nine providers probed on
+    11 November 2026 verified from the system store *and* from the IGTF bundle
+    (Sectigo, HARICA and Amazon roots are IGTF members), so shipping keys in
+    this package would add a renewal burden - and a supply-chain one - for no
+    reach.
+    """
     from .tls import client_context
 
     return client_context(
         credential_pem=credential.to_pem() if credential is not None else None,
         ca_path=ca_path or credentials.grid_ca_path(),
+        system_ca=True,
         check_hostname=True,
     )
 

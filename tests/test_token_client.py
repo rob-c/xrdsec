@@ -687,3 +687,43 @@ def test_an_issuer_that_was_not_named_is_not_checked_for(issuer: Issuer) -> None
         jwks={"keys": [_jwk(issuer.key)]},
     )
     assert claims["iss"] == "https://anywhere.example.org"
+
+
+# ---------------------------------------------------------------------------
+# What a token endpoint is trusted with
+# ---------------------------------------------------------------------------
+
+
+def test_a_token_endpoint_is_trusted_with_the_system_store_as_well(monkeypatch: Any) -> None:
+    """An IAM carries a public web certificate: the grid bundle alone cannot vouch for it.
+
+    Trusting only the grid CA directory failed with "unable to get local issuer
+    certificate" on a machine whose bundle was absent - while every provider
+    verifies from the operating system's store.
+    """
+    from xrdsec import tls
+
+    seen: dict[str, Any] = {}
+
+    def captured(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return ssl.create_default_context()
+
+    monkeypatch.setattr(tls, "client_context", captured)
+    token_client._context(None, "/some/where")
+    assert seen["system_ca"] is True
+    assert seen["ca_path"] == "/some/where"
+    assert seen["credential_pem"] is None
+
+
+def test_the_grid_directory_is_still_used_when_none_was_named(monkeypatch: Any) -> None:
+    from xrdsec import tls
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(credentials, "grid_ca_path", lambda *a, **k: "/grid/certs")
+    monkeypatch.setattr(
+        tls, "client_context", lambda **kwargs: seen.update(kwargs) or ssl.create_default_context()
+    )
+    token_client._context(None, None)
+    assert seen["ca_path"] == "/grid/certs"
+    assert seen["system_ca"] is True
