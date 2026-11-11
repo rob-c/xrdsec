@@ -6,8 +6,11 @@ central VO-to-issuer service - and then *probed* rather than trusted: on
 11 November 2026 every issuer below answered its OpenID Provider
 configuration with an issuer id, a token endpoint, a device authorization
 endpoint, and the ``client_credentials``, ``device_code`` and
-``token-exchange`` grants. The ``scope`` a profile suggests comes from that
-issuer's own ``scopes_supported``.
+``token-exchange`` grants. The ``scope`` a profile suggests comes from exactly that
+issuer's own ``scopes_supported``, so it can never ask for something the issuer
+will refuse with ``invalid_scope`` - which is why the per-experiment IAMs, whose
+``scopes_supported`` carries no ``storage.*``, get ``wlcg.groups`` instead and a
+storage token from them needs the VO to enable those scopes first.
 
 **TLS.** Each issuer's chain was audited on 11 November 2026: the per-experiment
 IAMs at CERN are issued by Sectigo, the WLCG and EGI IAMs by HARICA (GEANT
@@ -78,28 +81,29 @@ PROVIDERS: Mapping[str, Provider] = {
         Provider(
             name="lhcb",
             issuer="https://lhcb-auth.cern.ch/",
-            scope="storage.read:/ storage.modify:/ wlcg.groups",
+            # no storage.* scope: LHCb must have its IAM enable them first
+            scope="openid profile offline_access wlcg.groups",
             storage=False,
             who="LHCb's own IAM at CERN",
         ),
         Provider(
             name="atlas",
             issuer="https://atlas-auth.cern.ch/",
-            scope="storage.read:/ storage.modify:/ wlcg.groups",
+            scope="openid profile offline_access wlcg.groups",
             storage=False,
             who="ATLAS's own IAM at CERN",
         ),
         Provider(
             name="cms",
             issuer="https://cms-auth.cern.ch/",
-            scope="storage.read:/ storage.modify:/ wlcg.groups",
+            scope="storage.read:/ wlcg.groups",  # CMS advertises read, not modify
             storage=True,
             who="CMS's own IAM at CERN",
         ),
         Provider(
             name="alice",
             issuer="https://alice-auth.cern.ch/",
-            scope="storage.read:/ storage.modify:/ wlcg.groups",
+            scope="openid profile offline_access wlcg.groups",
             storage=False,
             who="ALICE's own IAM at CERN",
         ),

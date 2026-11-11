@@ -23,6 +23,32 @@ def test_the_profiles_are_the_ones_the_wlcg_lists():
     assert providers.PROVIDERS["wlcg"].storage is True  # it advertises storage.* scopes
 
 
+def test_every_profile_asks_only_for_scopes_its_issuer_advertises():
+    """A scope an issuer does not advertise is refused as `invalid_scope`: never suggest one."""
+    advertised = {
+        "lhcb": {"openid", "profile", "offline_access", "wlcg", "wlcg.groups"},
+        "atlas": {"openid", "profile", "offline_access", "wlcg", "wlcg.groups"},
+        "cms": {"openid", "profile", "offline_access", "wlcg", "wlcg.groups", "storage.read:/"},
+        "alice": {"openid", "profile", "offline_access", "wlcg", "wlcg.groups"},
+        "wlcg": {
+            "openid",
+            "profile",
+            "offline_access",
+            "wlcg.groups",
+            "storage.read:/",
+            "storage.modify:/",
+            "storage.stage:/",
+        },
+        "cern": {"openid", "profile", "offline_access"},
+        "egi": {"openid", "profile", "offline_access"},
+        "dune": {"openid", "profile", "offline_access"},
+        "fermilab": {"openid", "profile", "offline_access"},
+    }
+    for name, known in advertised.items():
+        asked = set(providers.PROVIDERS[name].scope.split())
+        assert asked <= known, f"{name} asks for {asked - known}"
+
+
 def test_a_profile_is_named_in_a_list_and_chosen():
     assert providers.names() == sorted(providers.names())
     assert providers.chosen("LHCB").name == "lhcb"  # case is not a thing here
@@ -46,7 +72,7 @@ def test_a_name_that_resembles_nothing_gets_the_list(monkeypatch: pytest.MonkeyP
 def test_a_profile_supplies_the_issuer_and_its_scope():
     said = providers.resolve("lhcb")
     assert said.issuer == "https://lhcb-auth.cern.ch/"
-    assert said.scope.startswith("storage.read:/")
+    assert said.scope.startswith("openid")  # what LHCb's IAM advertises
     assert said.audience == providers.AUDIENCE
     assert (said.from_issuer, said.from_scope, said.from_audience) == (
         "profile",
