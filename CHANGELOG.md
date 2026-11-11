@@ -10,6 +10,17 @@ with xrdclient and xgfalclient (2026-10-20).
 
 ### Added
 
+- `xrdsec.providers`: the token issuers a WLCG person actually meets, as named
+  profiles - `lhcb`, `atlas`, `cms`, `alice`, `wlcg`, `cern`, `egi`, `dune`,
+  `fermilab` - taken from the WLCG AuthZ working group's list of production
+  issuers and then *probed* rather than trusted: every one answered its
+  discovery document with a token endpoint, a device authorization endpoint and
+  the client-credentials, device-code and token-exchange grants (11 Nov 2026).
+  `resolve` gives one place for the precedence the whole stack uses - what was
+  typed, then `WLCG_TOKEN_ISSUER`/`WLCG_TOKEN_AUDIENCE`/`WLCG_TOKEN_SCOPE`,
+  then the profile - so the environment always wins.
+
+
 - `xrdsec.token_client`: the WLCG Common JWT Profile's client half, in the
   standard library and `cryptography` alone - no HEP tooling, nothing new to
   install. `discover` reads an issuer's OpenID configuration or a resource's
