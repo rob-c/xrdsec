@@ -60,7 +60,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from .. import credentials
+from .. import credentials, locations
 
 if TYPE_CHECKING:
     from .pki import PKI, BasePKI
@@ -175,6 +175,10 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathF
     # Not created: a test that wants a grid-wide directory makes one inside it.
     grid = tmp_path_factory.mktemp("etc") / "grid-security"
     monkeypatch.setattr(credentials, "GRID_SECURITY_DIRS", (str(grid),))
+    # The fallback stages (a CVMFS mount, the working directory) are empty here too:
+    # a test that wants one asks for it, and no test depends on the host's CVMFS.
+    monkeypatch.setattr(locations, "CVMFS_GRID_SECURITY", ())
+    monkeypatch.setattr(locations, "WORKDIR", str(tmp_dir / "cwd"))
     return Hermetic(home, tmp_dir, grid, monkeypatch, tmp_path_factory)
 
 

@@ -97,7 +97,8 @@ def load_pair(
     locked = encrypted(data)
     if locked and password is None:
         raise CredentialError(
-            f"the {KIND} {key} is encrypted and no pass phrase was given: pass key_password="
+            f"the {KIND} {key} is encrypted and no pass phrase was given: supply the key "
+            "password (or answer the prompt that names it)"
         )
     try:
         with _as_file(data, key) as keyfile:

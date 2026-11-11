@@ -46,7 +46,7 @@ token = tokens.discover_token(token=configured_token, query=url_query)
 |---|---|
 | `der`, `rsa`, `aes`, `p256`, `ed25519`, `signatures` | DER encoding and the primitives, as grid protocols shape them |
 | `x509` | certificates and proxy files: reading, proxy rules (XrdCl's and Globus'), building blocks |
-| `proxies` | the one proxy issuer - profiles `rfc3820` (default), `arc`, `xrootd`, `globus`, `globus-legacy` - with `issue_proxy`, `create_proxy`, `write_proxy`, `load_credential`, `describe_proxy`/`ProxyInfo`, `voms_extension` |
+| `proxies` | the one proxy issuer - profiles `rfc3820` (default), `arc`, `xrootd`, `globus`, `globus-legacy` - with `issue_proxy`, `create_proxy`, `write_proxy`, `load_credential`, `load_p12`/`credential_from_p12` (a PKCS#12 bundle as a credential), `describe_proxy`/`ProxyInfo`, `voms_extension` |
 | `delegation` | the PKCS#10 request parser, the certificate builder, XrdCrypto's `sign_proxy_request` (the `xrootd` profile), Globus' `sign_globus_request` (the `globus` profile) and `make_proxy_request` (what a delegation target sends) |
 | `userproxy` | an in-memory proxy from a user certificate and key (`XrdSecgsi`'s `createpxy`) |
 | `trust` | is this GSI server who it says it is, before delegating to it |

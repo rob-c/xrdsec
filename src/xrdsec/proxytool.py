@@ -59,7 +59,7 @@ from .voms_client import (
     find_vomses,
     servers_for,
 )
-from .x509 import ProxyCredential, load_certificates
+from .x509 import ProxyCredential, load_certificates, quiet_serial_warning
 
 __all__ = [
     "ARCPROXY",
@@ -276,6 +276,10 @@ class ProxyRequest:
     #: ``vomses`` files or directories; empty means the standard places
     #: (:func:`xrdsec.voms_client.find_vomses`).
     vomses: tuple[str, ...] = ()
+    #: The ``vomses`` configuration, when the caller has already read it - a
+    #: command that checked the VO names before prompting for a pass phrase
+    #: passes what it found, so a CVMFS ``vomses`` directory is not read twice.
+    configured: Sequence[VOMSServer] | None = None
     #: How the VOMS servers are reached (:func:`xrdsec.voms_client.fetch_ac`).
     timeout: float = DEFAULT_TIMEOUT
     ca_path: str | None = None
@@ -339,11 +343,16 @@ def fetch_acs(
     if not request.voms:
         return []
     hooks: Progress = _Silent() if progress is None else progress
-    configured = find_vomses(request.vomses or None)
     lifetime = request.voms_lifetime or request.lifetime
     acs: list[bytes] = []
     for wanted in request.voms:
-        servers = servers_for(wanted.vo, configured)
+        # ``vo=``: on a CVMFS mount a vomses *directory* is 126 files, and
+        # reading all of them to find one VO's servers costs tens of seconds.
+        # ``configured`` is what a caller already read, so it is not read twice.
+        if request.configured is not None:
+            servers = servers_for(wanted.vo, request.configured)
+        else:
+            servers = servers_for(wanted.vo, find_vomses(request.vomses or None, vo=wanted.vo))
         hooks.contacting(wanted, servers)
         with _warnings_to(hooks):
             ac = fetch_ac(
@@ -368,11 +377,20 @@ def _warnings_to(progress: Progress) -> Iterator[None]:
     Handed over after the filters are restored, so a hook that warns again
     (the default) is not caught by its own collection. :mod:`warnings`'
     state is process-wide: a command makes one proxy at a time.
+
+    ``always`` is what makes every one of the server's warnings come through,
+    and it is also what resurrects the noise those filters were silencing: a
+    VOMS request validates the AC against the CA directory, and
+    ``cryptography`` complains about the non-positive serials several IGTF
+    CAs carry - 40 of them for one LHCb proxy, with the server's own warning
+    lost among them. The package's filter for that one message is put back
+    inside the block.
     """
     caught: list[warnings.WarningMessage] = []
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
+            quiet_serial_warning()
             yield
     finally:
         for warning in caught:

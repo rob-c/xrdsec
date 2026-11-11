@@ -12,10 +12,12 @@ from __future__ import annotations
 import os
 import pickle
 import time
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from cryptography.utils import CryptographyDeprecationWarning
 
 from xrdcore.errors import CredentialError, InsecureCredentialError
 from xrdsec import credentials, proxytool
@@ -29,7 +31,8 @@ from xrdsec.proxytool import (
     VOMSRequest,
 )
 from xrdsec.testing.proxygrid import FakeVOMS, Grid, ac_answer, build_grid, error_answer
-from xrdsec.voms_client import VOMSRefusedError, VOMSServer, VOMSWarning
+from xrdsec.voms_client import VOMSRefusedError, VOMSServer, VOMSWarning, find_vomses, servers_for
+from xrdsec.x509 import SERIAL_WARNING
 
 
 @pytest.fixture
@@ -228,6 +231,28 @@ def test_warnings_reach_the_hooks_when_a_later_vo_fails(grid: Grid, tmp_path: Pa
     assert kinds == ["contacting", "warned", "contacted", "contacting"]
 
 
+def test_the_igtf_serial_noise_is_not_reported_as_a_voms_warning() -> None:
+    """``always`` catches every VOMS warning, and must not resurrect cryptography's 40.
+
+    Validating an AC walks the CA directory, and several IGTF CAs carry a
+    non-positive serial: converting all that to ``warned`` calls buried the
+    server's own warning under 40 lines of deprecation.
+    """
+    with proxytool._warnings_to(hooks := Recorder()):
+        warnings.warn(VOMSWarning("the server shortened the AC"), stacklevel=2)
+        # attributed to an xrdsec module, as the CA loader's own warning is
+        warnings.warn_explicit(
+            f"{SERIAL_WARNING} (i.e., it was negative or zero)",
+            CryptographyDeprecationWarning,
+            filename="xrdsec/x509.py",
+            lineno=1,
+            module="xrdsec.x509",
+        )
+    assert [event[1] for event in hooks.events if event[0] == "warned"] == [
+        "the server shortened the AC"
+    ]
+
+
 def test_without_hooks_a_warning_stays_a_python_warning(grid: Grid, tmp_path: Path) -> None:
     with FakeVOMS(grid, lambda query: ac_answer(grid.make_ac(), "heads up")) as fake:
         request = ProxyRequest(
@@ -238,6 +263,16 @@ def test_without_hooks_a_warning_stays_a_python_warning(grid: Grid, tmp_path: Pa
         with pytest.warns(VOMSWarning, match="heads up"):
             acs = proxytool.fetch_acs(grid.credential(), request)
     assert len(acs) == 1
+
+
+def test_servers_already_read_are_not_read_again(grid: Grid, tmp_path: Path) -> None:
+    """A command that checked the VO names passes what it read: nothing is read twice."""
+    with FakeVOMS(grid, lambda query: ac_answer(grid.make_ac())) as fake:
+        configured = servers_for("atlas", find_vomses(_vomses(tmp_path, fake, "atlas")))
+        request = ProxyRequest(
+            voms=(VOMSRequest("atlas"),), vomses=("/nowhere",), configured=configured
+        )
+        assert len(proxytool.fetch_acs(grid.credential(), request)) == 1
 
 
 def test_an_expired_signer_is_refused_before_any_server_is_asked(grid: Grid) -> None:

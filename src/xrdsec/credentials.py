@@ -86,8 +86,10 @@ __all__ = [
     "find_bearer_token",
     "find_proxy",
     "find_user_credential",
+    "globus_pem_pair",
     "grid_ca_path",
     "grid_voms_dir",
+    "machine_grid_security",
     "read_private_file",
     "write_private_file",
 ]
@@ -149,13 +151,18 @@ def _setting(env: Mapping[str, str], name: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _candidates(kind: str) -> tuple[str, ...]:
-    """The conventional homes of ``grid-security/<kind>``, most likely first.
+def machine_grid_security(kind: str) -> tuple[str, ...]:
+    """The machine's own ``grid-security/<kind>`` directories, most likely first.
 
     :data:`GRID_SECURITY_DIRS` when it is set. Otherwise Linux has the one;
     on a Mac, Homebrew's prefix is searched too, Apple Silicon's before
     Intel's. ``sys.platform`` and the attribute are read per call, which is
     what lets a test ask for the other platform's answer, or for none.
+
+    The *whole* search - an environment variable, these, CVMFS, the working
+    directory - is :func:`xrdsec.locations.grid_security_directories`; this is
+    only the machine stage of it, which is also the whole of what a tool that
+    predates CVMFS support used.
     """
     if GRID_SECURITY_DIRS is not None:
         return tuple(os.path.join(directory, kind) for directory in GRID_SECURITY_DIRS)
@@ -163,6 +170,17 @@ def _candidates(kind: str) -> tuple[str, ...]:
     if sys.platform == "darwin":
         return (f"/etc/{suffix}", f"/opt/homebrew/etc/{suffix}", f"/usr/local/etc/{suffix}")
     return (f"/etc/{suffix}",)
+
+
+def _candidates(kind: str) -> tuple[str, ...]:
+    """Every ``grid-security/<kind>`` a lookup tries, in stage order, the machine's included.
+
+    The paths only: :func:`xrdsec.locations.grid_security_directories` is the
+    same list with the stage and origin of each, which is what a report prints.
+    """
+    from . import locations
+
+    return tuple(location.path for location in locations.grid_security_directories(kind))
 
 
 def _grid_directory(env: Mapping[str, str], variable: str, kind: str) -> str | None:
@@ -269,6 +287,82 @@ def _private_file_at(path: str, kind: str) -> bool:
     return True
 
 
+#: How much of a ``~/.globus`` file is read to tell a certificate from a key: the
+#: first PEM header of each is far above this, and a file may be a chain.
+PEM_SNIFF_BYTES = 64 * 1024
+
+#: The PEM headers that make a file a certificate, or a key.
+_CERTIFICATE_HEADER = b"CERTIFICATE-----"
+_PRIVATE_KEY_HEADER = b"PRIVATE KEY-----"
+
+
+def globus_pem_pair(
+    environ: Mapping[str, str] | None = None, home: str | None = None
+) -> tuple[tuple[str, str] | None, str]:
+    """A certificate and key in ``~/.globus`` under names of their own, and a note.
+
+    ``find_user_credential`` knows the documented pair, ``usercert.pem`` beside
+    ``userkey.pem``. A certificate is also downloaded as ``cert.pem`` with
+    ``key.pem``, or ``mycert.pem`` with ``mykey.pem``, and occasionally as one
+    file holding both. A file is read as a certificate or a key by its PEM
+    header, not by its name, and a file with both is used for both.
+
+    Returns ``((certificate, key), "")``; ``(None, "")`` when there is no such
+    file; and ``(None, note)`` when there is more than one candidate, so the
+    caller can ask for the pair by name rather than pick an identity.
+    ``home`` overrides ``$HOME``, for a caller that knows better than the
+    environment whose home to read.
+    """
+    directory = os.path.join(home or _expand_home("~", _environ(environ)), ".globus")
+    certificates, keys, combined = _pem_roles(directory)
+    if len(combined) == 1:
+        return (combined[0], combined[0]), ""
+    if len(certificates) == 1 and len(keys) == 1:
+        return (certificates[0], keys[0]), ""
+    if certificates or keys or combined:
+        return None, (
+            f"~/.globus holds {len(certificates)} certificate(s) and {len(keys)} key(s)"
+            " besides usercert.pem/userkey.pem: name the pair with -cert and -key"
+        )
+    return None, ""
+
+
+def _pem_roles(directory: str) -> tuple[list[str], list[str], list[str]]:
+    """The certificates, keys and combined PEMs in ``directory``, by their PEM headers."""
+    certificates: list[str] = []
+    keys: list[str] = []
+    combined: list[str] = []
+    for path in _pem_paths(directory):
+        data = _pem_head(path)
+        if data is None:
+            continue
+        if _CERTIFICATE_HEADER in data and _PRIVATE_KEY_HEADER in data:
+            combined.append(path)
+        elif _CERTIFICATE_HEADER in data:
+            certificates.append(path)
+        elif _PRIVATE_KEY_HEADER in data:
+            keys.append(path)
+    return certificates, keys, combined
+
+
+def _pem_paths(directory: str) -> list[str]:
+    """Every ``*.pem`` in ``directory``, or none when it is not there."""
+    try:
+        names = sorted(entry for entry in os.listdir(directory) if entry.endswith(".pem"))
+    except OSError:
+        return []
+    return [os.path.join(directory, name) for name in names]
+
+
+def _pem_head(path: str) -> bytes | None:
+    """The start of ``path``, enough to see its PEM headers; ``None`` if it cannot be read."""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(PEM_SNIFF_BYTES)
+    except OSError:
+        return None
+
+
 def find_user_credential(
     environ: Mapping[str, str] | None = None,
     *,
@@ -288,6 +382,8 @@ def find_user_credential(
     when it is used: :func:`xrdsec.tls.client_context` reads it through
     :func:`read_private_file` and never writes it anywhere.
     """
+    from . import locations
+
     env = _environ(environ)
     cert, key = _setting(env, "X509_USER_CERT"), _setting(env, "X509_USER_KEY")
     if cert and key:
@@ -297,6 +393,9 @@ def find_user_credential(
         pair = os.path.join(base, "usercert.pem"), os.path.join(base, "userkey.pem")
         if os.path.isfile(pair[0]) and os.path.isfile(pair[1]):
             return pair
+    for certificate, private in locations.user_pairs(env)[-1:]:
+        if os.path.isfile(certificate.path) and os.path.isfile(private.path):
+            return certificate.path, private.path
     return None
 
 

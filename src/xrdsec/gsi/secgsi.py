@@ -73,12 +73,13 @@ import binascii
 import fnmatch
 import ipaddress
 import os
+import secrets
 import socket
 import struct
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from xrdcore.errors import CredentialError
+from xrdcore.errors import CredentialError, TransientError
 from xrdcore.log import get_logger
 
 from ..aes import cbc_decrypt, cbc_encrypt
@@ -132,6 +133,7 @@ __all__ = [
     "find_bucket",
     "parse_dh_parameters",
     "parse_peer_blob",
+    "random_tag",
     "read_proxy",
     "seal",
     "server_names",
@@ -195,6 +197,16 @@ REFUSAL = "Not allowed to sign proxy requests"
 SESSION_KEY_LEN = 16
 #: Length of the random tags each side sends for the other to sign.
 RTAG_LEN = 8
+#: What a random tag is drawn from: ``XrdSutRndm::GetRndmTag``'s "crypt"
+#: alphabet, ``[a-zA-Z0-9./]``. A peer signs the other side's tag with its
+#: private key, PKCS#1 v1.5 and no digest, so the signed value must not be
+#: the peer's choice of arbitrary bytes: from XRootD 6.2
+#: (``XrdSecgsiRtag.hh``) a server refuses to sign a tag that is not exactly
+#: :data:`RTAG_LEN` bytes of 7-bit ASCII, "whatever version the counter part
+#: claims to run", and dCache's generator (bytes ``0x00``-``0x7e``) stays
+#: inside the same rule. A tag of arbitrary bytes is refused with
+#: ``Secgsi: ErrSerialBuffer ... kXGC_certreq``, which is 255 logins in 256.
+RTAG_ALPHABET = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./"
 
 _NAME = b"gsi\x00"
 _BPUB = b"---BPUB---"
@@ -263,6 +275,15 @@ def decode_message(data: bytes) -> tuple[int, list[Bucket]]:
         buckets.append(Bucket(kind, data[pos : pos + length]))
         pos += length
     return step, buckets
+
+
+def random_tag() -> bytes:
+    """A tag to send for the server to sign: :data:`RTAG_LEN` bytes of :data:`RTAG_ALPHABET`.
+
+    Not :func:`os.urandom`: see :data:`RTAG_ALPHABET` for the rule a current
+    server holds the peer to.
+    """
+    return bytes(secrets.choice(RTAG_ALPHABET) for _ in range(RTAG_LEN))
 
 
 def find_bucket(data: bytes, kind: int) -> bytes | None:
@@ -579,9 +600,10 @@ def answer_certificate(
 
     Returns the message and the :class:`Session` a delegation round needs.
     ``private``, ``rtag`` and ``iv`` are injectable so the encoding can be
-    pinned by a test; leave them unset in production and they are drawn from
-    :func:`os.urandom`. ``padded=False`` is for a server whose crypto module
-    says ``nopad``.
+    pinned by a test; leave them unset in production and ``private`` and ``iv``
+    come from :func:`os.urandom` and ``rtag`` from :func:`random_tag`, whose
+    alphabet a current server insists on. ``padded=False`` is for a server
+    whose crypto module says ``nopad``.
     """
     blob, signed = _peer_blob(challenge)
     peer = parse_peer_blob(blob)
@@ -599,7 +621,7 @@ def answer_certificate(
     inner = [
         Bucket(BUCKET_X509, chain_pem),
         *_signed_tag(find_bucket(challenge, BUCKET_MAIN), key),
-        Bucket(BUCKET_RTAG, rtag if rtag is not None else os.urandom(RTAG_LEN)),
+        Bucket(BUCKET_RTAG, rtag if rtag is not None else random_tag()),
     ]
     main = seal(secret, encode_message(STEP_CLIENT_CERT, inner), use_iv=signed, iv=iv)
     # Our public value g^x mod p, in the server's own parameters' framing.
@@ -825,6 +847,18 @@ def check_server(chain_pem: bytes, check: ServerCheck) -> bool:
     try:
         verify_server(chain_pem, _expected_name(chain_pem, check), check.ca_path)
     except TrustError as exc:
+        if exc.code == "ca_directory":
+            # The CA store could not be *read*: a CVMFS or NFS mount that is
+            # remounting under a handshake does exactly this, and it is a
+            # filesystem hiccup rather than anything the server did. Reporting
+            # it as "the server did not prove its identity" sent a user after
+            # $X509_CERT_DIR and $XrdSecGSISRVNAMES for a mount that came back
+            # a second later, so it is a transient failure and says so.
+            raise TransientError(
+                f"the CA directory could not be read while checking {check.host}: {exc}. "
+                "A shared mount that is remounting does this: try again, and if it"
+                " persists check $X509_CERT_DIR"
+            ) from exc
         named, tried = _dns_name_for(chain_pem, check)
         if named:
             return False
@@ -927,7 +961,7 @@ class SecgsiClient:
                 f"the X.509 proxy {self.proxy.path or '<memory>'} expired "
                 f"{-self.proxy.remaining() / 3600:.1f} hours ago; renew it"
             )
-        self._rtag = os.urandom(RTAG_LEN)
+        self._rtag = random_tag()
         self._session, self._may_delegate, self._dns_only = None, False, False
         return build_certreq(
             cryptomod=self.cryptomod + ("" if self.padded or not self.signed else NOPAD),

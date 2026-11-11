@@ -8,6 +8,7 @@ import socket
 import subprocess
 import warnings
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from xrdsec.voms_client import (
     find_vomses,
     parse_vomses,
     servers_for,
+    vomses_files,
 )
 from xrdsec.x509 import Name, ProxyCredential
 
@@ -72,6 +74,38 @@ def test_parse_vomses_reads_the_five_fields():
     assert servers[0].origin == "here:3" and servers[1].vo == "cms"
     assert servers[0].address == "voms1.example.org:15001"
     assert VOMSServer("a", "::1", 1, "", "a").address == "[::1]:1"
+
+
+def test_a_line_with_the_trailing_field_cern_writes_is_read():
+    """``grid.cern.ch`` ends six of its vomses lines with a bare port/version field.
+
+    Refusing them would make the whole directory unreadable - one such line
+    stops every VO on a machine that mounts that bundle - so the first five
+    fields are used and anything after them is ignored, as glite does.
+    """
+    line = (
+        '"bes" "voms.ihep.ac.cn" "15001" "/C=CN/O=HEP/OU=CC/O=IHEP/CN=voms.ihep.ac.cn" "bes" "24"'
+    )
+    (server,) = parse_vomses(line, "bes")
+    assert (server.alias, server.host, server.port, server.vo) == (
+        "bes",
+        "voms.ihep.ac.cn",
+        15001,
+        "bes",
+    )
+
+
+def test_an_unknown_vo_names_the_ones_that_are_configured():
+    """Choosing a VO needs to know which ones this machine can ask."""
+    servers = parse_vomses(ATLAS + CMS, "here")
+    with pytest.raises(VOMSConfigError, match="configured: atlas, cms") as typo:
+        servers_for("atls", servers)
+    assert "did you mean 'atlas'" in str(typo.value)
+    with pytest.raises(VOMSConfigError, match="no VOMS server is configured for 'lhcb'"):
+        servers_for("lhcb", servers)
+    with pytest.raises(VOMSConfigError, match="install the VO's vomses file") as empty:
+        servers_for("atlas", [])
+    assert "configured:" not in str(empty.value)
 
 
 @pytest.mark.parametrize(
@@ -172,7 +206,9 @@ def test_an_ac_is_fetched_validated_and_usable(grid):
     assert said == []
     assert path == "/generate-ac"
     assert query == {"fqans": ["/atlas,/atlas/Role=pilot"], "lifetime": ["7200"]}
-    assert dict(field[0] for field in peer["subject"])["commonName"] == "Jane Doe"
+    # a proxy is presented, as voms-proxy-init presents one: the user's DN, plus the proxy's CN
+    values = [value for rdn in peer["subject"] for _oid, value in rdn]
+    assert values.count("Jane Doe") == 1 and values[-1] != "Jane Doe"
     proxy = create_proxy(grid.credential(), voms_acs=[ac])
     assert validate_voms(proxy.chain).status is VOMSStatus.OK
 
@@ -413,3 +449,80 @@ def test_one_tls_builder_presents_a_credential_from_memory(grid):
     assert tls.client_context(credential_pem=pem, ca_path=str(grid.ca_dir)) is first
     with pytest.raises(ValueError, match="not both"):
         tls.client_context(cert=str(grid.usercert), credential_pem=pem)
+
+
+# ---------------------------------------------------------------------------
+# The cost of a directory of vomses files
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_files_that_could_hold_the_vo_are_read(tmp_path: Path):
+    """A CVMFS vomses directory is one file per VO: reading 126 to find one is half a minute."""
+    directory = tmp_path / "vomses.d"
+    directory.mkdir()
+    (directory / "voms-atlas-auth.example.org").write_text(ATLAS)
+    (directory / "voms-lhcb-auth.example.org").write_text(
+        '"lhcb" "voms-lhcb.example.org" "15000" "/CN=lhcb" "lhcb"\n'
+    )
+    (directory / "voms-cms-auth.example.org").write_text(CMS)
+    found = find_vomses(directory, vo="lhcb")
+    assert [server.vo for server in found] == ["lhcb"]
+
+
+def test_a_directory_not_named_after_its_vos_is_still_searched(tmp_path: Path):
+    """The file-name shortcut must never lose an answer: the rest are read when it finds none."""
+    directory = tmp_path / "vomses.d"
+    directory.mkdir()
+    (directory / "shared").write_text(CMS + ATLAS)
+    found = find_vomses(directory, vo="atlas")
+    assert ("atlas", "voms1.example.org") in [(server.vo, server.host) for server in found]
+
+
+def test_the_files_a_lookup_would_read_are_listed_without_reading_them(tmp_path: Path):
+    """For a report deciding whether reading the whole configuration is worth it."""
+    single = tmp_path / "vomses"
+    single.write_text(ATLAS)
+    directory = tmp_path / "vomses.d"
+    directory.mkdir()
+    (directory / "cms").write_text(CMS)
+    assert vomses_files(single) == [single]
+    assert vomses_files([single, directory]) == [single, directory / "cms"]
+    assert vomses_files(environ={"X509_VOMSES": str(single)}) == [single]
+    assert vomses_files(environ={"X509_VOMSES": str(tmp_path / "gone")}) == []
+
+
+def test_a_user_certificate_is_wrapped_in_a_proxy_for_the_server(grid):
+    """VOMS servers authenticate a proxy, as voms-proxy-init presents one - not a bare cert."""
+    from xrdsec.voms_client import _authentication
+
+    user = grid.credential()
+    presented = _authentication(user)
+    assert presented.chain[0].is_proxy
+    assert presented.chain[1].subject == user.chain[0].subject  # the user, below the proxy
+    # a proxy is already one: handed over unchanged
+    assert _authentication(presented) is presented
+
+
+def test_asking_for_one_vo_does_not_read_the_other_servers_files(tmp_path: Path):
+    """The WLCG bundle has one ``vomses`` file per server; asking for one VO must not read them all.
+
+    On a CVMFS mount every file costs a round trip to open and another to close,
+    which is what made ``xrd-proxy init`` take half a minute. The others are
+    made unreadable here, so a regression that reads them fails loudly instead
+    of quietly going slow again.
+    """
+    from xrdsec.voms_client import find_vomses
+
+    folder = tmp_path / "vomses"
+    folder.mkdir()
+    (folder / "voms-lhcb-auth.cern.ch").write_text(
+        '"lhcb" "voms-lhcb-auth.cern.ch" 443 "/CN=voms-lhcb-auth.cern.ch" "lhcb"\n'
+    )
+    for index in range(20):
+        other = folder / f"voms-atlas{index}.cern.ch"
+        other.write_text(f'"atlas" "voms-atlas{index}.cern.ch" 15000 "/CN=a{index}" "atlas"\n')
+        other.chmod(0o000)
+
+    servers = find_vomses(folder, vo="lhcb")
+
+    assert [each.host for each in servers] == ["voms-lhcb-auth.cern.ch"]

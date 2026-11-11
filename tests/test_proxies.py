@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from cryptography import x509 as cx509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from cryptography.hazmat.primitives.asymmetric.types import (
     CertificateIssuerPrivateKeyTypes,
@@ -563,7 +563,56 @@ def test_describe_proxy_says_what_voms_proxy_info_says(user, grid):
     data = info.as_dict()
     assert (data["type"], data["voms"][0]["vo"]) == (info.kind, "atlas")
     assert data["voms"][0]["fqans"] == ["/atlas/Role=NULL/Capability=NULL"]
+    # The chain, link by link, with what each link is.
+    assert [(link["kind"], link["is_ca"]) for link in data["chain"]] == [
+        ("RFC3820 compliant impersonation proxy", False),
+        ("end entity credential", False),
+        ("CA", True),
+    ]
+    assert data["chain"][0]["serial"] == info.chain[0].serial
+    assert data["chain"][1]["subject"] == str(user.chain[0].subject)
+    assert data["chain"][2]["issuer"] == data["chain"][2]["subject"]  # a self-signed CA
     assert describe_proxy(proxy.chain, now=proxy.chain[0].not_after + 5).time_left == 0
+
+
+def test_a_link_whose_basic_constraints_will_not_parse_is_not_a_ca(user):
+    """A damaged extension is described as best it can be, not as a claim to sign."""
+    leaf = cx509.load_der_x509_certificate(user.chain[0].der)
+    broken = (
+        cx509.CertificateBuilder()
+        .subject_name(leaf.subject)
+        .issuer_name(leaf.issuer)
+        .public_key(leaf.public_key())
+        .serial_number(leaf.serial_number)
+        .not_valid_before(leaf.not_valid_before_utc)
+        .not_valid_after(leaf.not_valid_after_utc)
+        .add_extension(
+            cx509.UnrecognizedExtension(
+                cx509.ObjectIdentifier("2.5.29.19"), b"\x30\x7f\x01\x01\xff"
+            ),
+            False,
+        )
+        .sign(key(1), hashes.SHA256())
+    )
+    described = describe_proxy([parse_certificate(broken.public_bytes(serialization.Encoding.DER))])
+    assert described.chain[0].is_ca is False
+
+
+def test_a_chain_says_what_each_link_is(user):
+    """Proxy, then the user certificate; a CA only when the chain carried one."""
+    proxy = create_proxy(user)
+    full = describe_proxy(proxy)
+    assert [link.kind for link in full.chain] == [
+        "RFC3820 compliant impersonation proxy",
+        "end entity credential",
+        "CA",
+    ]
+    assert [link.is_ca for link in full.chain] == [False, False, True]
+    # A proxy file that stops at the user's certificate carries no CA.
+    short = describe_proxy(tuple(proxy.chain[:2]))
+    assert [link.is_ca for link in short.chain] == [False, False]
+    assert short.chain[-1].kind == "end entity credential"
+    assert short.chain[0].issuer == short.chain[1].subject
 
 
 def test_describe_proxy_tells_limited_plain_and_ec_apart(user):

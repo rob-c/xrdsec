@@ -80,13 +80,20 @@ def vomses_fields(line: str) -> tuple[str, str, int, str, str] | None:
     may become a ``vomsdir`` path component later) or a port outside 1-65535
     raises ``ValueError`` - including a non-numeric port, via ``int``, and an
     unterminated quote, via :func:`shlex.split`.
+
+    **Five or more** fields are accepted, the first five used and the rest
+    ignored, because some distributions append one: CERN's ``grid.cern.ch``
+    CA distribution ends six lines with a bare ``"24"`` (``bes``, ``calice``,
+    ``cepc``, ``ilc``, ``lsst``...), and refusing them would make the whole
+    directory unreadable - one such line currently stops every VO on a machine
+    that mounts that bundle. The glite tools ignore the extra fields too.
     """
     fields = shlex.split(line, comments=True)
     if not fields:
         return None
     if (
-        len(fields) != 5
-        or not all(_endpoint_text(field) for field in fields)
+        len(fields) < 5
+        or not all(_endpoint_text(field) for field in fields[:5])
         or not (_safe_vo(fields[0]) and _safe_vo(fields[4]))
     ):
         raise ValueError("invalid fields")

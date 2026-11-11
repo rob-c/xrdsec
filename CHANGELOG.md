@@ -8,7 +8,75 @@ Notable user-visible changes are recorded here. This project follows
 Fixes found moving data between the LHCb Tier-1 and Tier-2 storage elements
 with xrdclient and xgfalclient (2026-10-20).
 
+### Added
+
+- `xrdsec.locations`: the one search order every tool now uses - the
+  environment, the machine's own places, the WLCG bundle on CVMFS
+  (`/cvmfs/grid.cern.ch/etc/grid-security/...`, then
+  `cvmfs-config.cern.ch`), and the working directory. Stages 1 and 2 are the
+  old lists unchanged, so nothing a machine found before is lost; CVMFS and
+  `./grid-security/...` (and `./usercert.pem`+`./userkey.pem` for a pair) are
+  fallbacks after them. `xrdsec.credentials.grid_ca_path` and friends resolve
+  through it, so a machine with the WLCG bundle mounted and nothing in
+  `/etc/grid-security` now finds its trust anchors.
+- `xrdsec.doctor.check()`: the environment a grid proxy needs, checked in the
+  order it bites, with every hint written for whoever can act on it - the user,
+  the machine's admin, or the experiment - which is what `xrd-proxy doctor`
+  prints.
+- `xrdsec.credentials.globus_pem_pair()`: a certificate and key in `~/.globus`
+  under names of their own (`cert.pem` with `key.pem`, or one file holding
+  both), found by PEM header rather than by file name, and never guessed
+  between when there is more than one pair.
+- `ProxyInfo.chain`: every certificate of a credential chain as a
+  `ChainLink` (subject, issuer, serial, validity, what each link is - proxy,
+  end entity or `CA` by its own `basicConstraints`) - so `xrd-proxy info` and
+  `--json` can show the chain, not just its leaf. `ProxyInfo.as_dict()` gains
+  `chain`.
+- A PKCS#12 bundle is a credential in its own right: `proxies.load_p12`
+  (and `credential_from_p12` for bytes) turns the `.p12`/`.pfx` file a
+  certificate authority's portal hands out - certificate and private key in
+  one encrypted file - into the same `ProxyCredential` `load_credential`
+  makes from a `usercert.pem`/`userkey.pem` pair, so it can sign a proxy or a
+  delegation with no `~/.globus` layout. The bundle is read under the
+  private-file rules (ours, no group or other bits), its pass phrase is asked
+  for only when it is encrypted and only once, and what it carries beyond the
+  user certificate (issuing CAs) is kept after it in the bundle's order.
+
 ### Fixed
+
+- A VOMS proxy request no longer prints forty `cryptography` serial-number
+  deprecations and buries the server's own warning in them. Validating an AC
+  walks the CA directory, several IGTF CAs carry a non-positive serial, and
+  the warning collector that makes every VOMS warning visible
+  (`warnings.simplefilter("always")`) also resurrected the noise the package
+  filters for its own calls. The filter for that one message is re-installed
+  inside the collector, so a real warning still arrives and the deprecation
+  does not: 41 warnings for one LHCb proxy became 1.
+
+- `find_vomses` reads only the `vomses` files that can hold the VO asked about
+  when it is told which one (`vo=`), and a directory's files are read in
+  parallel for the callers that need them all. On a CVMFS mount each file
+  costs a round trip to open and another to close (~190 ms), so reading the
+  WLCG bundle's 126 files to find one VO was 20 s of a 20 s command.
+- `vomses_files()` says which files a lookup would read without reading them,
+  for a report that only wants to count them.
+- `fetch_ac` presents a **proxy** to the VOMS server - made in memory from a
+  bare user certificate, unchanged when the credential already is one - and
+  asks for `application/xml, text/xml` rather than `application/xml`, whose
+  absence from a VOMS-Admin servlet's producible types is a bare
+  `406 Not Acceptable`.
+- `ProxyRequest.configured` lets a caller hand over the `vomses` servers it
+  has already read, so a command does not read the configuration twice.
+
+- A `vomses` line with more than five fields is read, using the first five,
+  instead of failing the whole file. CERN's `grid.cern.ch` CA distribution
+  ends six of its `vomses` entries with a bare trailing field (`"bes" ...
+  "24"`), and one such line made every VO on a machine that mounts that
+  bundle unusable - `find_vomses` refused the directory. The glite tools
+  ignore the extra fields too.
+- The "no VOMS server" refusal now names the VOs and aliases that *are*
+  configured, and suggests the nearest one when the name looks like a typo,
+  so choosing a VO does not need the `vomses` files read by hand.
 
 - A GSI proxy request from a dCache door is now read and signed. dCache puts
   a single `Extension` straight into the `extensionRequest` `SET` (no

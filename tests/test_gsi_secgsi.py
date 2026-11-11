@@ -20,7 +20,7 @@ from typing import Any, TypeVar
 
 import pytest
 
-from xrdcore.errors import CredentialError
+from xrdcore.errors import CredentialError, TransientError
 from xrdsec.aes import cbc_decrypt
 from xrdsec.gsi import secgsi
 from xrdsec.gsi.secgsi import (
@@ -41,6 +41,8 @@ from xrdsec.gsi.secgsi import (
     CLIENT_DIGESTS,
     CLIENT_OPTS_DEFAULT,
     REFUSAL,
+    RTAG_ALPHABET,
+    RTAG_LEN,
     STEP_CLIENT_CERT,
     STEP_CLIENT_CERTREQ,
     STEP_SERVER_CERT,
@@ -344,6 +346,30 @@ def test_the_certreq_carries_what_the_server_reads():
 def test_the_advertised_version_selects_unsigned_dh():
     """At or above 10400 the server would choose signed DH."""
     assert VERSION_UNSIGNED_DH < 10400 <= VERSION_SIGNED_DH
+
+
+def test_a_generated_tag_is_one_a_current_server_will_sign():
+    """``XrdSecgsiRtag.hh``: ``RTAG_LEN`` bytes of 7-bit ASCII, or no signature.
+
+    XRootD 6.2 refuses a tag it did not expect to be peer-chosen bytes, so a
+    random tag drawn from :func:`os.urandom` fails the login (255 times in
+    256); this is the shape a server 6.2 and later accepts.
+    """
+    tag = secgsi.random_tag()
+    assert len(tag) == RTAG_LEN
+    assert set(tag) <= set(RTAG_ALPHABET)
+    assert max(tag) <= 0x7F
+    assert secgsi.random_tag() != tag
+
+
+def test_the_certreq_of_a_real_login_carries_a_well_formed_tag(proxy):
+    """The generator reaches the wire: the very first message's tag passes the rule."""
+    main = find_bucket(SecgsiClient(proxy).initial(), BUCKET_MAIN)
+    assert main is not None
+    tag = find_bucket(main, BUCKET_RTAG)
+    assert tag is not None
+    assert len(tag) == RTAG_LEN
+    assert max(tag) <= 0x7F
 
 
 def test_an_empty_cryptomod_falls_back_to_ssl():
@@ -824,6 +850,25 @@ def test_a_server_whose_ca_is_not_trusted_is_refused(pki, proxy, tmp_path):
     )
     client.initial()
     with pytest.raises(CredentialError, match="no CA in the certificate directory"):
+        client.step(signed_challenge(pki))
+
+
+def test_a_ca_directory_that_cannot_be_read_is_transient_not_a_liar(pki, proxy, tmp_path):
+    """A mount remounting under a handshake must not read as "the server lied about its name".
+
+    Seen on the VM: CVMFS was remounted as a copy started, the CA directory came
+    back ENOENT, and the copy failed with "the GSI server ... did not prove its
+    identity: ... cannot read the CA directory", which sends the user after
+    $X509_CERT_DIR and $XrdSecGSISRVNAMES for a state that cleared in a second.
+    A store that cannot be *read* is a transient failure, and says so.
+    """
+    client = SecgsiClient(
+        proxy,
+        server_version=10400,
+        server_check=ServerCheck("srv.example.org", str(tmp_path / "gone")),
+    )
+    client.initial()
+    with pytest.raises(TransientError, match="could not be read"):
         client.step(signed_challenge(pki))
 
 

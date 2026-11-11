@@ -337,7 +337,7 @@ def test_empty_vomses_explains_issuance_not_validation(tmp_path, content, layout
     "line",
     [
         '"atlas" "host" "15000" "/CN=server"',  # missing alias
-        '"atlas" "host" "15000" "/CN=server" "atlas" "extra"',
+        '"atlas" "host" "15000" "atlas"',  # no server DN
         '"atlas" "host" "0" "/CN=server" "atlas"',
         '"atlas" "host" "65536" "/CN=server" "atlas"',
         '"atlas" "host" "abc" "/CN=server" "atlas"',

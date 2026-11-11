@@ -753,7 +753,8 @@ def test_voms_name_path_and_holder_edges(tmp_path, monkeypatch):
     assert voms._escape_dn(" #comma, ") == r"\ #comma\,\ "
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr("xrdsec.credentials.GRID_SECURITY_DIRS", None)  # the platform's own
-    assert _gridpaths._candidates("vomsdir") == ("/etc/grid-security/vomsdir",)
+    # the platform's own home comes first; CVMFS and the working directory follow it
+    assert _gridpaths._candidates("vomsdir")[0] == "/etc/grid-security/vomsdir"
     monkeypatch.delenv("X509_CERT_DIR", raising=False)
     monkeypatch.setattr(os.path, "isdir", lambda _path: False)
     assert default_ca_path() is None

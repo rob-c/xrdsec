@@ -330,3 +330,70 @@ def test_a_named_link_is_followed_and_a_predictable_one_refused(tmp_path):
     assert credentials.read_private_file(str(tmp_path / "link"), kind="t") == b"secret"
     with pytest.raises(InsecureCredentialError, match="symbolic link"):
         credentials.read_private_file(str(tmp_path / "link"), kind="t", predictable=True)
+
+
+# ---------------------------------------------------------------------------
+# The ~/.globus files under names of their own
+# ---------------------------------------------------------------------------
+
+
+def _globus(tmp_path: Path, *names: str, data: bytes = b"-----BEGIN CERTIFICATE-----\n") -> Path:
+    """A ``.globus`` directory holding ``names``, each with ``data``."""
+    home = tmp_path / "home"
+    (home / ".globus").mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (home / ".globus" / name).write_bytes(data)
+    return home
+
+
+def test_one_certificate_and_one_key_under_other_names_are_a_pair(tmp_path):
+    home = _globus(tmp_path, "cert.pem")
+    (home / ".globus" / "key.pem").write_bytes(b"-----BEGIN PRIVATE KEY-----\n")
+    pair, note = credentials.globus_pem_pair({}, home=str(home))
+    assert pair == (
+        str(home / ".globus" / "cert.pem"),
+        str(home / ".globus" / "key.pem"),
+    )
+    assert note == ""
+
+
+def test_one_file_holding_both_is_both_halves(tmp_path):
+    home = _globus(tmp_path, "me.pem")
+    (home / ".globus" / "me.pem").write_bytes(
+        b"-----BEGIN CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\n"
+    )
+    pair, note = credentials.globus_pem_pair({}, home=str(home))
+    path = str(home / ".globus" / "me.pem")
+    assert pair == (path, path) and note == ""
+
+
+def test_two_candidate_pairs_are_not_guessed_between(tmp_path):
+    home = _globus(tmp_path, "a-cert.pem", "b-cert.pem")
+    for name in ("a-key.pem", "b-key.pem"):
+        (home / ".globus" / name).write_bytes(b"-----BEGIN PRIVATE KEY-----\n")
+    pair, note = credentials.globus_pem_pair({}, home=str(home))
+    assert pair is None
+    assert "2 certificate(s) and 2 key(s)" in note and "name the pair" in note
+
+
+def test_nothing_recognisable_is_no_pair_and_no_note(tmp_path):
+    home = _globus(tmp_path, "notes.pem", data=b"nothing to see\n")
+    assert credentials.globus_pem_pair({}, home=str(home)) == (None, "")
+    assert credentials.globus_pem_pair({}, home=str(tmp_path / "no-home")) == (None, "")
+
+
+def test_a_file_that_cannot_be_read_is_skipped(tmp_path):
+    home = _globus(tmp_path, "cert.pem")
+    locked = home / ".globus" / "locked.pem"
+    locked.write_bytes(b"-----BEGIN CERTIFICATE-----\n")
+    locked.chmod(0o000)
+    (home / ".globus" / "key.pem").write_bytes(b"-----BEGIN PRIVATE KEY-----\n")
+    pair, _note = credentials.globus_pem_pair({}, home=str(home))
+    assert pair is not None and pair[0].endswith("cert.pem")
+
+
+def test_home_comes_from_the_environment_when_not_named(tmp_path):
+    home = _globus(tmp_path, "cert.pem")
+    (home / ".globus" / "key.pem").write_bytes(b"-----BEGIN PRIVATE KEY-----\n")
+    pair, _note = credentials.globus_pem_pair({"HOME": str(home)})
+    assert pair is not None and pair[1].endswith("key.pem")

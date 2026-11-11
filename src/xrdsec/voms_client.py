@@ -47,6 +47,7 @@ from __future__ import annotations
 import base64
 import binascii
 import datetime
+import difflib
 import http.client
 import os
 import ssl
@@ -54,10 +55,12 @@ import urllib.parse
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from xrdcore.errors import CredentialError
+from xrdcore.fanout import run_all
 from xrdcore.safexml import UnsafeXML, fromstring
 
 from . import credentials
@@ -80,10 +83,20 @@ __all__ = [
     "find_vomses",
     "parse_vomses",
     "servers_for",
+    "vomses_files",
 ]
 
 #: Seconds allowed for each server's connection and answer.
 DEFAULT_TIMEOUT = 30.0
+
+#: What a ``generate-ac`` answer is asked for. ``application/xml`` is what the
+#: REST documentation shows, but a VOMS-Admin instance declares ``text/xml``,
+#: and a servlet asked for a type it cannot produce answers **406 Not
+#: Acceptable** - which is how a perfectly good proxy request came back as
+#: "HTTP 406 without a VOMS answer" from a real server. Both are acceptable
+#: here, and anything else as a last resort: the answer is parsed by its
+#: content, not by its declared type.
+_ACCEPT = "application/xml, text/xml;q=0.9, */*;q=0.1"
 #: Far more than any AC answer (a few kilobytes); a bigger one is not read.
 _MAX_ANSWER = 1 << 20
 #: Error codes after which the next server is worth asking: the failure was
@@ -197,6 +210,8 @@ def parse_vomses(text: str, origin: str = "vomses") -> list[VOMSServer]:
 def find_vomses(
     paths: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None = None,
     environ: Mapping[str, str] | None = None,
+    *,
+    vo: str | None = None,
 ) -> list[VOMSServer]:
     """Every configured VOMS server, from ``paths`` or the standard places.
 
@@ -211,6 +226,16 @@ def find_vomses(
     message saying where to put the file. Raises :class:`VOMSConfigError`
     for a named path that is missing, or any file that is unreadable or
     malformed.
+
+    ``vo`` is the VO the caller is about to ask. A ``vomses`` *directory*
+    has one file per VO - 126 of them in the WLCG bundle - and reading every
+    one to find a single VO is what made ``xrd-proxy init`` take half a
+    minute on a CVMFS mount: each file costs a network round trip to open and
+    another to close. With ``vo`` named, the files whose names mention it are
+    read first (``voms-lhcb-auth.cern.ch`` for ``lhcb``) and the rest are
+    left alone once one of them has the VO; a directory laid out the other
+    way, or a single shared ``vomses`` file, still ends up with the same
+    answer through the full scan that follows.
     """
     env = os.environ if environ is None else environ
     if paths is not None:
@@ -218,12 +243,75 @@ def find_vomses(
         locations, required = [os.fspath(path) for path in named], True
     else:
         locations, required = _configured(env)
+    return _merged(locations, required, vo)
+
+
+def _merged(locations: Sequence[str], required: bool, vo: str | None) -> list[VOMSServer]:
+    """Every location's servers, duplicates dropped, stopping once ``vo`` has been found."""
     found: list[VOMSServer] = []
     for location in locations:
-        for server in _read_location(Path(location), required):
-            if server not in found:
-                found.append(server)
+        _collect(found, _read_location(Path(location), required, vo=vo))
+        if vo is not None and _serves(found, vo):
+            break
     return found
+
+
+def _collect(found: list[VOMSServer], servers: Sequence[VOMSServer]) -> None:
+    """Add the servers ``found`` does not already have, in order."""
+    found.extend(server for server in servers if server not in found)
+
+
+def vomses_files(
+    paths: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> list[Path]:
+    """Every ``vomses`` file a lookup would read, in order, without reading any of them.
+
+    For a caller deciding whether reading them is worth it: a ``vomses``
+    directory on CVMFS holds one file per VO (126 of them in the WLCG bundle)
+    and each costs a network round trip to close, so a report that only wants
+    to say where the configuration is asks this instead of
+    :func:`find_vomses`.
+    """
+    env = os.environ if environ is None else environ
+    if paths is not None:
+        named = [paths] if isinstance(paths, str | os.PathLike) else list(paths)
+        locations = [os.fspath(path) for path in named]
+    else:
+        locations, _required = _configured(env)
+    files: list[Path] = []
+    for location in locations:
+        path = Path(location)
+        if path.is_dir():
+            files.extend(_voms._trust_files(path))
+        elif path.is_file():
+            files.append(path)
+    return files
+
+
+def lsc_name(server: VOMSServer) -> str:
+    """The ``vomsdir`` file this server's ACs are validated against: ``<host>.lsc``.
+
+    An LSC is named for the *server*, not for the VO: a VO's directory can hold
+    ``voms-lhcb-auth.cern.ch.lsc`` while a ``vomses`` line that still names
+    ``lcg-voms.cern.ch`` leaves every AC it issues unvalidatable. So the name
+    comes from the configured server DN's CN, and from the address only when
+    the DN names no CN.
+    """
+    dn = server.dn or ""
+    head, sep, tail = dn.rpartition("CN=")
+    host = tail.split("/", 1)[0].strip() if sep and head != dn else ""
+    return f"{host or server.host}.lsc"
+
+
+def lsc_names(servers: Sequence[VOMSServer]) -> list[str]:
+    """The LSCs ``servers`` need, in order, without duplicates."""
+    return list(dict.fromkeys(lsc_name(server) for server in servers))
+
+
+def _serves(servers: Sequence[VOMSServer], name: str) -> bool:
+    """Whether ``name`` (a VO or one of its aliases) is among ``servers``."""
+    return any(server.vo == name or server.alias == name for server in servers)
 
 
 def _configured(environ: Mapping[str, str]) -> tuple[list[str], bool]:
@@ -246,8 +334,13 @@ def _configured(environ: Mapping[str, str]) -> tuple[list[str], bool]:
     return defaults, False
 
 
-def _read_location(location: Path, required: bool) -> list[VOMSServer]:
-    """The servers in one ``vomses`` file, or in every visible file of a directory."""
+def _read_location(location: Path, required: bool, *, vo: str | None = None) -> list[VOMSServer]:
+    """The servers in one ``vomses`` file, or in every visible file of a directory.
+
+    With ``vo`` named, a directory's files whose names mention it are read
+    first and the scan stops as soon as one of them serves it
+    (:func:`find_vomses`); the rest are read only when that found nothing.
+    """
     if location.is_dir():
         files = _voms._trust_files(location)
     elif location.is_file():
@@ -256,14 +349,50 @@ def _read_location(location: Path, required: bool) -> list[VOMSServer]:
         raise VOMSConfigError(f"the vomses configuration {location} does not exist")
     else:
         return []
-    servers: list[VOMSServer] = []
-    for file in files:
-        try:
-            text = file.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise VOMSConfigError(f"cannot read the vomses file {file}: {exc}") from exc
-        servers.extend(parse_vomses(text, str(file)))
+    first, rest = _by_relevance(files, vo)
+    servers = _parse_files(first)
+    if vo is None or _serves(servers, vo):
+        return servers
+    servers.extend(_parse_files(rest))
     return servers
+
+
+def _by_relevance(files: Sequence[Path], vo: str | None) -> tuple[list[Path], list[Path]]:
+    """``files`` split into the ones whose name mentions ``vo`` and the others."""
+    if vo is None:
+        return list(files), []
+    named = [file for file in files if vo.lower() in file.name.lower()]
+    return named, [file for file in files if file not in named]
+
+
+def _parse_files(files: Sequence[Path]) -> list[VOMSServer]:
+    """Every server the ``vomses`` files hold, read side by side, in file order.
+
+    Side by side because a CVMFS file costs a round trip to open and another
+    to close: one after the other, the WLCG bundle's 126 files are half a
+    minute's work, and in parallel a second's.
+    """
+    if len(files) < 2:
+        return [server for file in files for server in _parse_file(file)]
+    texts = run_all([partial(_read_vomses, file) for file in files], name="vomses-files")
+    return [
+        server
+        for file, text in zip(files, texts, strict=True)
+        for server in parse_vomses(text, str(file))
+    ]
+
+
+def _read_vomses(file: Path) -> str:
+    """One ``vomses`` file's text, or :class:`VOMSConfigError` naming it."""
+    try:
+        return file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise VOMSConfigError(f"cannot read the vomses file {file}: {exc}") from exc
+
+
+def _parse_file(file: Path) -> list[VOMSServer]:
+    """One ``vomses`` file's servers."""
+    return parse_vomses(_read_vomses(file), str(file))
 
 
 def servers_for(name: str, servers: Iterable[VOMSServer]) -> list[VOMSServer]:
@@ -279,10 +408,28 @@ def servers_for(name: str, servers: Iterable[VOMSServer]) -> list[VOMSServer]:
     if not chosen:
         where = "anywhere" if not pool else "among the configured servers"
         raise VOMSConfigError(
-            f"no VOMS server is configured for {name!r} {where}; install the VO's vomses "
-            "file in ~/.voms/vomses or /etc/vomses, or point X509_VOMSES at it"
+            f"no VOMS server is configured for {name!r} {where}{_configured_hint(name, pool)}"
         )
     return chosen
+
+
+def _configured_hint(name: str, pool: Sequence[VOMSServer]) -> str:
+    """The rest of the message: what *is* configured, and the nearest name when there is one.
+
+    Choosing a VO means knowing which ones this machine can ask, so the
+    refusal names them (aliases included, since an alias is what
+    ``-voms`` takes) and guesses only when the complaint is a typo of exactly
+    one of them.
+    """
+    known = sorted({server.vo for server in pool} | {server.alias for server in pool})
+    if not known:
+        return (
+            "; install the VO's vomses file in ~/.voms/vomses or /etc/vomses,"
+            " or point X509_VOMSES at it"
+        )
+    nearest = difflib.get_close_matches(name, known, n=1, cutoff=0.6)
+    suggestion = f" - did you mean {nearest[0]!r}?" if nearest else ""
+    return f"{suggestion}; configured: {', '.join(known)}"
 
 
 def ac_extension(acs: Sequence[bytes]) -> bytes:
@@ -393,18 +540,40 @@ def _context(
     written. The CA directory defaults to the grid's
     (:func:`xrdsec.credentials.grid_ca_path`) rather than the system store,
     because VOMS servers carry IGTF host certificates.
+
+    A VOMS server authenticates a **proxy**, which is what ``voms-proxy-init``
+    creates first and presents (:meth:`_authentication`): a bare user
+    certificate - what a PKCS#12 bundle holds - is refused, and VOMS-Admin's
+    refusal for it is a bare ``406``.
     """
     from .tls import client_context
 
     try:
         return client_context(
-            credential_pem=credential.to_pem(),
+            credential_pem=_authentication(credential).to_pem(),
             ca_path=ca_path or credentials.grid_ca_path(),
             system_ca=system_ca,
             x509_strict=strict,
         )
     except (ssl.SSLError, OSError) as exc:
         raise VOMSError(f"cannot present {credential.subject} to a VOMS server: {exc}") from exc
+
+
+def _authentication(credential: ProxyCredential) -> ProxyCredential:
+    """``credential`` when it is already a proxy, else a proxy made from it, in memory.
+
+    ``voms-proxy-init`` makes a short proxy first and asks VOMS with *that*;
+    the servers authenticate a proxy chain and refuse a plain end-entity
+    certificate. Making one costs a key generation (~100 ms) and nothing
+    else: it never touches the disk and the final proxy is made afterwards,
+    as before.
+    """
+    from .proxies import create_proxy
+
+    if not credential.chain or credential.chain[0].is_proxy:
+        # nothing to wrap in, or already a proxy: hand it over as it is
+        return credential
+    return create_proxy(credential, lifetime=min(credential.remaining(), 3600.0))
 
 
 def _ask(server: VOMSServer, query: str, context: ssl.SSLContext, timeout: float) -> bytes:
@@ -421,7 +590,7 @@ def _ask(server: VOMSServer, query: str, context: ssl.SSLContext, timeout: float
         connection.request(
             "GET",
             f"/generate-ac{query}",
-            headers={"Accept": "application/xml", "User-Agent": f"xrdsec/{__version__}"},
+            headers={"Accept": _ACCEPT, "User-Agent": f"xrdsec/{__version__}"},
         )
         response = connection.getresponse()
         status, body = response.status, response.read(_MAX_ANSWER + 1)

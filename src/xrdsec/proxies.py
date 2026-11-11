@@ -73,8 +73,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
 
+from ._p12 import credential_from_p12, load_p12
 from ._proxyfiles import load_credential, write_proxy
-from ._proxyinfo import ProxyInfo, describe_proxy
+from ._proxyinfo import ChainLink, ProxyInfo, describe_proxy
 from .delegation import (
     ISSUER_ALT_NAME_OID,
     KEY_USAGE_OID,
@@ -125,13 +126,16 @@ __all__ = [
     "DEFAULT_LIFETIME",
     "NOT_BEFORE_SKEW",
     "PROFILES",
+    "ChainLink",
     "ProfileName",
     "ProxyError",
     "ProxyInfo",
     "create_proxy",
+    "credential_from_p12",
     "describe_proxy",
     "issue_proxy",
     "load_credential",
+    "load_p12",
     "voms_extension",
     "write_proxy",
 ]

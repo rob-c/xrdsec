@@ -26,9 +26,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, rsa
 
 from .delegation import KEY_USAGE_OID, proxy_path_length
-from .der import DERError, parse_one
+from .der import TAG_BOOLEAN, DERError, parse, parse_one
 from .voms import VOMSEntry, inspect_voms
 from .x509 import (
+    BASIC_CONSTRAINTS_OID,
     INDEPENDENT_OID,
     INHERIT_ALL_OID,
     LEGACY_PROXY_OID,
@@ -43,7 +44,7 @@ from .x509 import (
     proxy_policy,
 )
 
-__all__ = ["ProxyInfo", "describe_proxy"]
+__all__ = ["ChainLink", "ProxyInfo", "describe_proxy"]
 
 #: ``keyUsage`` bit names in bit order (RFC 5280 4.2.1.3), as OpenSSL and
 #: ``voms-proxy-info`` print them.
@@ -67,6 +68,40 @@ _POLICY_WORDS = {
     LIMITED_PROXY_OID: "limited",
     INDEPENDENT_OID: "independent",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ChainLink:
+    """One certificate of a credential chain, as ``xrd-proxy info`` lists them.
+
+    Plain values for one link: the leaf first, then each issuer up to the
+    trust anchor the file happened to carry (a proxy file usually stops at the
+    user's own certificate). ``kind`` repeats :attr:`ProxyInfo.kind`'s wording
+    for a proxy, and says ``"CA"`` for a certificate that may sign others - so
+    a chain lists as a proxy signed by a user certificate signed by nothing in
+    the file, rather than three lines that look alike.
+    """
+
+    subject: str
+    issuer: str
+    serial: int
+    not_before: float
+    not_after: float
+    kind: str
+    #: Whether this link is a CA certificate (``basicConstraints``), by its own claim.
+    is_ca: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        """Plain JSON-ready values."""
+        return {
+            "subject": self.subject,
+            "issuer": self.issuer,
+            "serial": self.serial,
+            "not_before": self.not_before,
+            "not_after": self.not_after,
+            "kind": self.kind,
+            "is_ca": self.is_ca,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +139,8 @@ class ProxyInfo:
     voms: tuple[VOMSEntry, ...]
     #: The file the chain came from, when it came from one.
     path: str = ""
+    #: Every certificate of the chain, leaf first, as :class:`ChainLink` values.
+    chain: tuple[ChainLink, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """Plain JSON-ready values, the VOMS ACs reduced to what ``-all`` prints."""
@@ -122,6 +159,7 @@ class ProxyInfo:
             "time_left": self.time_left,
             "path": self.path,
             "voms": [_voms_dict(entry) for entry in self.voms],
+            "chain": [link.as_dict() for link in self.chain],
         }
 
 
@@ -161,6 +199,29 @@ def describe_proxy(
         time_left=max(0.0, not_after - moment),
         voms=inspect_voms(links).entries,
         path=path,
+        chain=tuple(_link(link, index) for index, link in enumerate(links)),
+    )
+
+
+def _link(certificate: Certificate, index: int) -> ChainLink:
+    """One chain entry: what it is, who signed it, and when it is valid.
+
+    ``index`` is the leaf's 0; the wording of ``kind`` is the same as
+    :attr:`ProxyInfo.kind`, except that a CA certificate says so instead of
+    being called an end entity.
+    """
+    extensions = {ext.oid: ext for ext in extensions_of(certificate.der)}
+    kind, _limited = _kind(certificate, extensions)
+    basic = extensions.get(BASIC_CONSTRAINTS_OID)
+    is_ca = _is_ca(basic.value) if basic is not None else False
+    return ChainLink(
+        subject=str(certificate.subject),
+        issuer=str(certificate.issuer),
+        serial=certificate.serial,
+        not_before=certificate.not_before,
+        not_after=certificate.not_after,
+        kind="CA" if is_ca else kind,
+        is_ca=is_ca,
     )
 
 
@@ -186,6 +247,21 @@ def _kind(leaf: Certificate, extensions: dict[str, Any]) -> tuple[str, bool]:
         limited = legacy == "limited proxy"
         return ("limited" if limited else "full") + " legacy globus proxy", limited
     return _END_ENTITY, False
+
+
+def _is_ca(value: bytes) -> bool:
+    """Whether a ``basicConstraints`` value claims ``cA=TRUE``.
+
+    ``BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, ... }`` and DER
+    omits a FALSE default, so ``cA`` appears only when it is TRUE; a non-DER
+    ``FALSE`` (``01 01 00``) is read as false rather than as present. A value
+    that will not parse is not a claim to sign certificates.
+    """
+    try:
+        members = parse(value)[0].children()
+    except (DERError, ValueError, IndexError):
+        return False
+    return bool(members) and members[0].tag == TAG_BOOLEAN and members[0].value != b"\x00"
 
 
 def _path_length(info: Any) -> int | None:
