@@ -50,6 +50,8 @@ __all__ = [
     "AUDIENCE",
     "DEFAULT_SCOPE",
     "DEVICE_GRANT",
+    "DIRACX_BEGIN",
+    "DIRACX_END",
     "EXCHANGE",
     "Issuer",
     "Token",
@@ -58,6 +60,7 @@ __all__ = [
     "device_authorization",
     "device_poll",
     "discover",
+    "embedded",
     "exchange",
     "read_token",
     "token_file_path",
@@ -88,6 +91,16 @@ OIDC_DOCUMENT = "/.well-known/openid-configuration"
 
 #: How long any request may take before it is given up on.
 TIMEOUT = 30.0
+
+#: How DIRAC keeps a token in a proxy file: a block of base64 JSON between these.
+#:
+#: ``dirac-login`` (DIRAC 9's ``DIRAC.Core.Security.DiracX``) obtains a token by
+#: *proxy exchange* - the server's ``Framework/ProxyManager`` answers
+#: ``exchangeProxyForToken()`` for the identity the TLS handshake proved, and the
+#: same file then carries both credentials. No client registration and no device
+#: flow: the proxy is the credential. Reading that block needs nothing of DIRAC.
+DIRACX_BEGIN = "-----BEGIN DIRACX-----"
+DIRACX_END = "-----END DIRACX-----"
 
 #: Clock skew allowed when a token's ``exp``/``nbf`` are read, in seconds.
 LEEWAY = 60
@@ -539,6 +552,42 @@ def write_token(
         os.close(handle)
     os.chmod(target, 0o600)
     return target
+
+
+def embedded(text: str) -> dict[str, Any] | None:
+    """The token DIRAC embedded in a proxy file, as the JSON it wrapped, or ``None``.
+
+    DIRAC's own writer puts base64 of ``TokenResponse`` between
+    :data:`DIRACX_BEGIN` and :data:`DIRACX_END` in the proxy PEM, so one file
+    carries both credentials. A file without that block - the ordinary case for
+    an ``xrd-proxy init`` proxy - answers ``None``.
+    """
+    start = text.find(DIRACX_BEGIN)
+    end = text.find(DIRACX_END, start + len(DIRACX_BEGIN))
+    if start < 0 or end < 0:
+        return None
+    payload = "".join(text[start + len(DIRACX_BEGIN) : end].split())
+    try:
+        found = json.loads(base64.b64decode(payload))
+    except (ValueError, TypeError) as exc:
+        raise TokenError(
+            f"the DIRACX block in this file is not base64 JSON: {exc}", code="not_a_jwt"
+        ) from exc
+    if not isinstance(found, dict) or not found.get("access_token"):
+        raise TokenError("the DIRACX block carries no access token", code="not_a_jwt")
+    return found
+
+
+def from_pem(text: str) -> Token:
+    """The :class:`Token` a DIRAC proxy file carries, or :class:`TokenError` if it carries none."""
+    block = embedded(text)
+    if block is None:
+        raise TokenError("this file carries no DIRACX token block", code="no_token")
+    return Token(
+        access_token=str(block["access_token"]),
+        expires_in=_float(block.get("expires_in")),
+        token_type=str(block.get("token_type") or "Bearer"),
+    )
 
 
 def read_token(environ: Mapping[str, str] | None = None, uid: int | None = None) -> tuple[str, str]:

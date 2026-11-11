@@ -727,3 +727,52 @@ def test_the_grid_directory_is_still_used_when_none_was_named(monkeypatch: Any) 
     token_client._context(None, None)
     assert seen["ca_path"] == "/grid/certs"
     assert seen["system_ca"] is True
+
+
+# ---------------------------------------------------------------------------
+# The token DIRAC keeps inside a proxy file
+# ---------------------------------------------------------------------------
+
+
+def _diracx_pem(token: dict[str, Any]) -> str:
+    """A proxy-shaped file with DIRAC's own token block in it."""
+    payload = base64.b64encode(json.dumps(token).encode()).decode()
+    return (
+        "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n"
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----\n"
+        f"{token_client.DIRACX_BEGIN}\n{payload}\n{token_client.DIRACX_END}\n"
+    )
+
+
+def test_a_dirac_proxy_carries_its_token_in_a_block_of_its_own() -> None:
+    """`dirac-login` exchanges the proxy for a token and writes both into one file.
+
+    That is DIRAC's way in without a device flow or a registered client: the
+    proxy authenticates the RPC, the server mints the token, and the file ends up
+    carrying both. Reading the block needs nothing of DIRAC.
+    """
+    token = {
+        "access_token": "header.payload.signature",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "refresh_token": "refresh",
+    }
+    found = token_client.embedded(_diracx_pem(token))
+    assert found is not None and found["refresh_token"] == "refresh"
+    assert token_client.from_pem(_diracx_pem(token)).expires_in == 3600
+
+
+def test_an_ordinary_proxy_carries_no_token() -> None:
+    with pytest.raises(token_client.TokenError, match="no DIRACX token block"):
+        token_client.from_pem("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    assert token_client.embedded("nothing here") is None
+
+
+def test_a_dirac_block_that_is_not_base64_json_is_refused() -> None:
+    broken = f"{token_client.DIRACX_BEGIN}\n!!!\n{token_client.DIRACX_END}\n"
+    with pytest.raises(token_client.TokenError, match="not base64 JSON"):
+        token_client.embedded(broken)
+    nothing = base64.b64encode(b"{}").decode()
+    empty = f"{token_client.DIRACX_BEGIN}\n{nothing}\n{token_client.DIRACX_END}\n"
+    with pytest.raises(token_client.TokenError, match="carries no access token"):
+        token_client.embedded(empty)
