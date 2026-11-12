@@ -346,7 +346,11 @@ def test_the_device_flow_hands_a_person_a_code(issuer: Issuer) -> None:
         issuer._issuer(), "my-client", scope="storage.read:/", ca_path=issuer._ca()
     )
     assert started["user_code"] == "ABCD-EFGH"
-    assert issuer.forms[-1] == {"client_id": "my-client", "scope": "storage.read:/"}
+    assert issuer.forms[-1] == {
+        "client_id": "my-client",
+        "scope": "storage.read:/",
+        "algorithm": token_client.PREFERRED_ALGORITHM,
+    }
     assert issuer.paths[-1] == "/devicecode"
 
 
@@ -844,5 +848,42 @@ def test_the_device_request_also_carries_its_parameters_in_the_query(
     token_client.device_authorization(
         issuer._issuer(), "my-client", scope="openid vo:lhcb", ca_path=issuer._ca()
     )
-    assert issuer.forms[-1] == {"client_id": "my-client", "scope": "openid vo:lhcb"}
+    assert issuer.forms[-1]["scope"] == "openid vo:lhcb"
     assert issuer.paths[-1].startswith("/devicecode")
+
+
+def test_the_device_request_asks_for_a_signature_htcondor_can_check(
+    issuer: Issuer,
+) -> None:
+    """RS256 by default: it is what a CE's SciTokens library can verify."""
+    token_client.device_authorization(issuer._issuer(), "c", ca_path=issuer._ca())
+    assert issuer.forms[-1]["algorithm"] == token_client.PREFERRED_ALGORITHM == "RS256"
+
+
+def test_the_signature_a_token_came_with_is_read_from_its_header() -> None:
+    """The issuer has the last word, so the answer is checked rather than assumed."""
+    header = base64.urlsafe_b64encode(json.dumps({"alg": "Ed25519"}).encode()).rstrip(b"=").decode()
+    assert token_client.algorithm_of(f"{header}.payload.signature") == "Ed25519"
+    assert "Ed25519" not in token_client.HTCONDOR_ALGORITHMS
+
+
+@pytest.mark.parametrize("token", ["one-part", "!!.payload.sig"])
+def test_a_header_that_names_no_algorithm_is_refused(token: str) -> None:
+    """A token whose header cannot be read is not a token."""
+    with pytest.raises(token_client.TokenError):
+        token_client.algorithm_of(token)
+
+
+def test_a_token_whose_header_is_not_an_object_is_refused() -> None:
+    """JSON that is not a header is not a token either."""
+    header = base64.urlsafe_b64encode(b"[1, 2]").rstrip(b"=").decode()
+    with pytest.raises(token_client.TokenError, match="names no signing algorithm"):
+        token_client.algorithm_of(f"{header}.payload.sig")
+
+
+def test_no_algorithm_can_be_asked_for_when_the_issuer_must_not_be_told(
+    issuer: Issuer,
+) -> None:
+    """An issuer that trips over unknown parameters can be asked without one."""
+    token_client.device_authorization(issuer._issuer(), "c", algorithm="", ca_path=issuer._ca())
+    assert "algorithm" not in issuer.forms[-1]

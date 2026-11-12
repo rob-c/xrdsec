@@ -83,6 +83,15 @@ AUDIENCE = "https://wlcg.cern.ch/jwt/v1/any"
 #: What to ask for when nobody says: read and write, and the VO's groups.
 DEFAULT_SCOPE = "storage.read:/ storage.modify:/ wlcg.groups"
 
+#: The signing algorithms HTCondor's SciTokens library can verify: ``scitokens-cpp``
+#: accepts RS256 and ES256 and has no EdDSA/Ed25519 support at all, so a token signed
+#: with anything else cannot be presented to an HTCondor-CE.
+HTCONDOR_ALGORITHMS = ("RS256", "ES256")
+
+#: What to ask an issuer to sign with, unless told otherwise - RSA, because that is
+#: what an HTCondor-CE can check. An issuer may ignore the request (DiracX does).
+PREFERRED_ALGORITHM = "RS256"
+
 #: Where a resource server publishes the issuers it trusts (WLCG profile).
 WLCG_TOKEN_DOCUMENT = "/.well-known/wlcg-token"
 
@@ -434,6 +443,7 @@ def device_authorization(
     client_id: str,
     *,
     scope: str = DEFAULT_SCOPE,
+    algorithm: str = PREFERRED_ALGORITHM,
     ca_path: str | None = None,
     timeout: float = TIMEOUT,
 ) -> dict[str, Any]:
@@ -456,6 +466,11 @@ def device_authorization(
     # from the *query string* and answers 422 without them. Sending both costs
     # nothing and works at either kind of issuer.
     asked = {"client_id": client_id, "scope": scope}
+    if algorithm:
+        # A request for a signing algorithm: an issuer that knows the parameter
+        # (some IAMs do) signs with it, and one that does not ignores it - which is
+        # why the answer's own `alg` is checked afterwards rather than assumed.
+        asked["algorithm"] = algorithm
     separator = "&" if urllib.parse.urlsplit(issuer.device_endpoint).query else "?"
     return _http(
         issuer.device_endpoint + separator + urllib.parse.urlencode(asked),
@@ -544,6 +559,21 @@ def device_poll(
         if any(f": {one}" in str(refused) for one in pending):
             return None
         raise
+
+
+def algorithm_of(token: str) -> str:
+    """The ``alg`` a token was signed with, read from its header without believing it."""
+    parts = token.split(".")
+    if len(parts) < 2:
+        raise TokenError("a token is three dot-separated parts")
+    header = parts[0] + "=" * (-len(parts[0]) % 4)
+    try:
+        said = json.loads(base64.urlsafe_b64decode(header))
+    except (ValueError, TypeError) as exc:
+        raise TokenError(f"a token's header is not base64url JSON: {exc}") from exc
+    if not isinstance(said, dict) or not isinstance(said.get("alg"), str):
+        raise TokenError("a token's header names no signing algorithm")
+    return str(said["alg"])
 
 
 def _token(answer: Mapping[str, Any]) -> Token:
