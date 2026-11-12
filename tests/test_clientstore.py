@@ -112,7 +112,7 @@ def test_a_failed_write_leaves_no_temporary_behind(
     def broken(*_args: object, **_kwargs: object) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(clientstore.os, "replace", broken)
+    monkeypatch.setattr(os, "replace", broken)
     with pytest.raises(OSError, match="disk full"):
         clientstore.remember("https://iam.example", "abc", environ=env)
     assert os.listdir(directory) == []
