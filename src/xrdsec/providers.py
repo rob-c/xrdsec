@@ -72,6 +72,10 @@ class Provider:
     storage: bool
     #: Who runs it, in a few words.
     who: str
+    #: The public client the issuer's own tools use, when it publishes one: a
+    #: device flow needs a client id, and making a person invent one is nonsense
+    #: when the issuer's own front end ships with it.
+    client_id: str = ""
 
 
 #: The profiles, in the order a person is likely to want them.
@@ -85,9 +89,13 @@ PROVIDERS: Mapping[str, Provider] = {
         Provider(
             name="lhcbdiracx",
             issuer="https://lhcbdiracx.app.cern.ch/",
-            scope="openid vo:lhcb",
+            # DiracX rejects `openid`; `vo:` (and `group:`) are its own scope names.
+            scope="vo:lhcb",
             storage=False,
             who="LHCb's DiracX - the issuer LHCb's own clients and CEs use",
+            # The id their own web client sends, found in its bundle: it is public
+            # and needs no registration, which is what makes this usable at all.
+            client_id="myDIRACClientID",
         ),
         Provider(
             name="lhcb",

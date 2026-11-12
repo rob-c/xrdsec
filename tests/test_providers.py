@@ -153,3 +153,13 @@ def test_our_own_variable_still_wins_over_the_alias() -> None:
         }
     )
     assert said.issuer == "https://iam.example"
+
+
+def test_lhcb_s_diracx_publishes_the_client_its_own_front_end_uses() -> None:
+    """A device flow needs a client id; the issuer's own web client carries one, and
+    it is public - so a person should not have to invent it."""
+    profile = providers.chosen("lhcbdiracx")
+    assert profile.client_id == "myDIRACClientID"
+    # DiracX rejects `openid`; `vo:`/`group:` are its own scope names.
+    assert profile.scope == "vo:lhcb"
+    assert "openid" not in profile.scope
