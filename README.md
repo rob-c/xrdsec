@@ -40,6 +40,110 @@ fresh = proxies.create_proxy(signer, voms_acs=acs)
 token = tokens.discover_token(token=configured_token, query=url_query)
 ```
 
+## `xrd-auth`: the command over this package
+
+Everything here is reachable from one command, installed by
+[xrdclient](https://github.com/rob-c/xrdclient) as **`xrd-auth`** — and, under its
+older name, **`xrd-proxy`**. The two are the same program; the usage line, the
+version banner and every error follow whichever you typed.
+
+```sh
+pip install xrdclient        # brings xrdsec with it, and the command
+xrd-auth --version
+xrd-auth doctor --summary     # one line per check, and what to do about each
+```
+
+It has grown past proxies, which is why it has two names: it makes and inspects
+X.509 proxies, acquires WLCG bearer tokens, registers itself as a client when an
+issuer allows it, and runs a doctor that explains what is wrong with your
+credentials in words you can act on.
+
+### The commands
+
+| command | what it does | the tool it replaces |
+|---|---|---|
+| `xrd-auth init` | make a proxy from a certificate, a PKCS#12 bundle, or a proxy | `voms-proxy-init` |
+| `xrd-auth info` | describe a proxy: subject, VOMS ACs, time left; `-verify` checks it | `voms-proxy-info` |
+| `xrd-auth destroy` | remove it | `voms-proxy-destroy` |
+| `xrd-auth doctor` | check the whole credential chain, and say who to ask | — |
+| `xrd-auth token init` | get a WLCG bearer token | `htgettoken`, `oidc-agent` |
+| `xrd-auth token info` | describe a token, or one embedded in a DIRAC proxy | `htgettoken -i` |
+| `xrd-auth token destroy` | remove it | — |
+| `xrd-auth token providers` | the named issuers, and what each one advertises | — |
+| `xrd-auth token register` | register this tool as a public client (RFC 7591) | — |
+
+Options take **one dash** as the VOMS tools do (`-voms lhcb`, `-valid 24:00`), and
+the two-dash spellings work too. Every command takes `--json`/`--xml` and `-quiet`.
+
+### Credentials
+
+```sh
+# from a PKCS#12 bundle, with LHCb's VO attributes
+xrd-auth init -p12 ~/mycert.p12 -voms lhcb -valid 24:00 -out ~/.x509up
+
+# what it made
+xrd-auth info -file ~/.x509up -vo -fqan -timeleft
+
+# a token, by the flow that fits
+xrd-auth token init --provider wlcg --flow device      # browser + code
+xrd-auth token init --provider wlcg --flow x509 --p12 ~/mycert.p12 --pwstdin
+xrd-auth token init --flow exchange --from-token "$TOKEN" --scope storage.read:/
+```
+
+An issuer will not hand out a token to an unnamed client. `xrd-auth token register`
+asks an issuer that allows self-registration (the WLCG reference IAM does; LHCb's
+IAM answers `403 You do not have enough privileges`), and keeps the client id in
+`~/.config/xrdsec/token-clients.json` (`0600`) so later runs find it. Issuers whose
+own tools ship a public client need none — LHCb's DiracX is one:
+
+```sh
+xrd-auth token init --provider lhcbdiracx --flow device --out ~/.condor/tokens.d/lhcb
+```
+
+Tokens are written to `--out`, else `$BEARER_TOKEN_FILE`, else `bt_u<uid>` in the
+working directory — `0600`, never through a symlink.
+
+### What it knows about where things are
+
+Four stages, in order: the environment (`X509_CERT_DIR`, `X509_USER_PROXY`,
+`X509_VOMS_DIR`, `BEARER_TOKEN_FILE`), the machine (`/etc/grid-security/…`,
+Homebrew's prefix, then a bundle in your home: `~/grid-ca/…`,
+`~/.grid-security/…`), CVMFS (`/cvmfs/grid.cern.ch/etc/grid-security`, then
+`/cvmfs/cvmfs-config.cern.ch`), and the working directory. `xrd-auth doctor`
+prints each stage it tried, so a missing file is never a mystery.
+
+Settings follow one precedence everywhere — **a command-line option beats the
+environment, and the environment beats a profile**:
+
+| variable | what it sets |
+|---|---|
+| `WLCG_TOKEN_ISSUER`, `WLCG_TOKEN_AUDIENCE`, `WLCG_TOKEN_SCOPE` | what to ask for |
+| `WLCG_CLIENT_ID` (or `WLCG_TOKEN_CLIENT_ID`) | which client to be |
+| `WLCG_TOKEN_ALGORITHM` | the signature to request (default `RS256`) |
+| `DIRACX_URL`, `DIRACX_CLIENT_ID` | the same two, as LHCb's own clients name them |
+
+### The doctor
+
+`xrd-auth doctor` is the part worth running first, and it speaks to three
+audiences on purpose — what you can do, what needs your admin, and what needs your
+experiment:
+
+```
+!!  certs       no grid CA directory: X509_CERT_DIR is unset and no usual directory is there
+                 -> do: mount the WLCG bundle at /cvmfs/grid.cern.ch/etc/grid-security/certificates
+!!  voms        no VOMS server configured: a proxy would carry no VO attributes
+                 -> ask your admin: install the VO's vomses file in ~/.voms/vomses
+```
+
+### One detail worth knowing
+
+An HTCondor-CE can only verify **RS256** and **ES256** signatures
+(`scitokens-cpp` has no Ed25519 support), so `token init` asks for RS256 by default
+and reports the signature it got. When an issuer signs with something else — LHCb's
+DiracX currently signs Ed25519 — it says so plainly, because such a token cannot be
+presented at a CE at all.
+
+
 ## Modules
 
 | module | what it is |
