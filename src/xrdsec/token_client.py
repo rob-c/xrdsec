@@ -37,7 +37,7 @@ import os
 import ssl
 import time
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -130,6 +130,8 @@ class Issuer:
     jwks_uri: str
     #: Where the device flow begins, when the issuer publishes one.
     device_endpoint: str = ""
+    #: Where a client can register itself (RFC 7591), when the issuer allows it.
+    registration_endpoint: str = ""
 
     @property
     def name(self) -> str:
@@ -217,6 +219,7 @@ def _http(
     context: ssl.SSLContext,
     *,
     form: Mapping[str, str] | None = None,
+    json_body: bytes | None = None,
     timeout: float = TIMEOUT,
 ) -> dict[str, Any]:
     """One HTTPS request: ``form`` makes it a POST, and its JSON answer comes back.
@@ -235,13 +238,15 @@ def _http(
     if form is not None:
         body = urllib.parse.urlencode(form).encode()
         headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif json_body is not None:
+        body = json_body
+        headers["Content-Type"] = "application/json"
     connection = http.client.HTTPSConnection(
         parts.hostname or "", parts.port or 443, context=context, timeout=timeout
     )
     try:
-        connection.request(
-            "POST" if form is not None else "GET", _target(parts), body=body, headers=headers
-        )
+        posting = form is not None or json_body is not None
+        connection.request("POST" if posting else "GET", _target(parts), body=body, headers=headers)
         response = connection.getresponse()
         return _json(response.status, response.read(), url)
     except (OSError, http.client.HTTPException) as exc:
@@ -277,7 +282,9 @@ def _json(status: int, body: bytes, url: str) -> dict[str, Any]:
         raise TokenError(f"{url} answered with something that is not JSON: {exc}") from exc
     if not isinstance(answer, dict):
         raise TokenError(f"{url} answered with JSON, but not an object")
-    if status != 200:
+    # 2xx is success: a token endpoint answers 200, and RFC 7591 registration
+    # answers 201 with the client it just created.
+    if not 200 <= status < 300:
         raise TokenError(_refusal(status, answer, body, url))
     return answer
 
@@ -346,6 +353,7 @@ def _issuer_of(document: Mapping[str, Any], fallback: str) -> Issuer:
         token_endpoint=endpoint,
         jwks_uri=str(document.get("jwks_uri") or ""),
         device_endpoint=str(document.get("device_authorization_endpoint") or ""),
+        registration_endpoint=str(document.get("registration_endpoint") or ""),
     )
 
 
@@ -450,6 +458,61 @@ def device_authorization(
         form={"client_id": client_id, "scope": scope},
         timeout=timeout,
     )
+
+
+#: The grant a command-line client uses: a code, and something to refresh with.
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+#: What a registered public client asks for: an identity, a refresh token, and the
+#: claim that carries group membership.
+PUBLIC_SCOPES = "openid profile offline_access"
+
+
+def register(
+    issuer: Issuer,
+    *,
+    name: str = "xrd-auth",
+    scope: str = PUBLIC_SCOPES,
+    grants: Sequence[str] = (DEVICE_GRANT, "refresh_token"),
+    contacts: Sequence[str] = (),
+    ca_path: str | None = None,
+    timeout: float = 20.0,
+    context: ssl.SSLContext | None = None,
+) -> dict[str, Any]:
+    """Register a public client at ``issuer`` and return what it answered (RFC 7591).
+
+    Most IAMs in WLCG allow this without asking anyone: the client is public, it
+    holds no secret, and a person still has to approve every device code. LHCb's
+    IAM does not - it wants an admin-issued initial access token - and the issuer's
+    own words are what comes back in that case.
+    """
+    if not issuer.registration_endpoint:
+        raise TokenError(
+            f"{issuer.name} publishes no registration endpoint: register a client by hand",
+            code="no_registration",
+        )
+    asked: dict[str, Any] = {
+        "client_name": name,
+        "grant_types": list(grants),
+        "redirect_uris": ["http://localhost"],
+        "scope": scope,
+        # A command line cannot keep a secret, so the client is public by design.
+        "token_endpoint_auth_method": "none",
+        "contacts": [contact for contact in contacts if contact],
+    }
+    body = json.dumps(asked).encode()
+    registered = _http(
+        issuer.registration_endpoint,
+        _context(None, ca_path) if context is None else context,
+        json_body=body,
+        timeout=timeout,
+    )
+    if not registered.get("client_id"):
+        raise TokenError(
+            f"{issuer.name} answered a registration request without a client id",
+            code="no_client",
+        )
+    return registered
 
 
 def device_poll(

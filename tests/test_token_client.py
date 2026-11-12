@@ -103,6 +103,10 @@ class Issuer:
         self.oidc = True
         self.wlcg = True
         self.device = True
+        self.registration = True
+        self.registered: list[dict[str, Any]] = []
+        self.registration_reply: dict[str, Any] | None = None
+        self.registration_status = 201
         self.reply: tuple[int, bytes] | None = None
         self.device_reply: dict[str, Any] | None = None
         self.keys_body: bytes | None = None
@@ -135,6 +139,13 @@ class Issuer:
         """The CA directory these servers are signed by (the fixture's)."""
         return str(self.ca_path)
 
+    def registration_answer(self, request: Request) -> Response:
+        """Answer a registration request: 201 Created, as RFC 7591 says."""
+        self.registered.append(json.loads(request.body or b"{}"))
+        if self.registration_reply is not None:
+            return Response(self.registration_status, json.dumps(self.registration_reply).encode())
+        return Response(201, json.dumps({"client_id": "dyn-1", "client_name": "xrd-auth"}).encode())
+
     def routes(self) -> None:
         """Answer the GETs and POSTs a token client makes."""
 
@@ -147,6 +158,8 @@ class Issuer:
             }
             if self.device:
                 fields["device_authorization_endpoint"] = f"{self.url}/devicecode"
+            if self.registration:
+                fields["registration_endpoint"] = f"{self.url}/iam/api/client-registration"
             return json.dumps(fields).encode()
 
         def oidc(request: Request) -> Response:
@@ -173,6 +186,11 @@ class Issuer:
         self.server.route("GET", r"/jwks", lambda request: Response(200, self.keys()))
         self.server.route("POST", r"/token", self.token)
         self.server.route("POST", r"/devicecode", self.devicecode)
+        self.server.route(
+            "POST",
+            r"/iam/api/client-registration",
+            lambda request: self.registration_answer(request),
+        )
 
     def keys(self) -> bytes:
         """The JWKS document, with the key the tokens are signed under."""
@@ -776,3 +794,41 @@ def test_a_dirac_block_that_is_not_base64_json_is_refused() -> None:
     empty = f"{token_client.DIRACX_BEGIN}\n{nothing}\n{token_client.DIRACX_END}\n"
     with pytest.raises(token_client.TokenError, match="carries no access token"):
         token_client.embedded(empty)
+
+
+def test_a_client_registers_itself_and_takes_the_id(issuer: Issuer) -> None:
+    """RFC 7591: a public client, no secret, and the id the issuer hands back.
+
+    A token endpoint answers 200; registration answers **201 Created**, which is
+    success and not a refusal.
+    """
+    registered = token_client.register(issuer._issuer(), ca_path=issuer._ca())
+
+    assert registered["client_id"] == "dyn-1"
+    asked = issuer.registered[-1]
+    assert asked["token_endpoint_auth_method"] == "none"
+    assert asked["grant_types"] == [token_client.DEVICE_GRANT, "refresh_token"]
+    assert asked["client_name"] == "xrd-auth"
+
+
+def test_an_issuer_that_allows_no_registration_says_so(issuer: Issuer) -> None:
+    """With no registration endpoint published there is nothing to ask."""
+    issuer.registration = False
+    (found,) = token_client.discover(issuer.url, ca_path=issuer._ca())
+    with pytest.raises(token_client.TokenError, match="no registration endpoint"):
+        token_client.register(found, ca_path=issuer._ca())
+
+
+def test_a_registration_without_an_id_is_not_a_registration(issuer: Issuer) -> None:
+    """A 201 that names no client leaves nothing to use."""
+    issuer.registration_reply = {"client_name": "xrd-auth"}
+    with pytest.raises(token_client.TokenError, match="without a client id"):
+        token_client.register(issuer._issuer(), ca_path=issuer._ca())
+
+
+def test_an_issuer_that_refuses_registration_is_quoted(issuer: Issuer) -> None:
+    """The issuer's own words are what a person needs, as for any other refusal."""
+    issuer.registration_reply = {"error": "access_denied", "error_description": "not for you"}
+    issuer.registration_status = 403
+    with pytest.raises(token_client.TokenError, match="not for you"):
+        token_client.register(issuer._issuer(), ca_path=issuer._ca())
