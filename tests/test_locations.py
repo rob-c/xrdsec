@@ -109,8 +109,11 @@ def test_cvmfs_is_only_a_fallback(staged, monkeypatch, tmp_path: Path):
 
 
 def test_cvmfs_answers_when_the_machine_has_nothing(staged, monkeypatch):
+    """With no machine directory and no bundle in a home, CVMFS is what is left."""
     monkeypatch.setattr(credentials, "GRID_SECURITY_DIRS", ())
     monkeypatch.setattr(os.path, "isdir", lambda _path: True)
+    # No bundle in a home either, or that would be the answer instead.
+    monkeypatch.delenv("HOME", raising=False)
     assert credentials.grid_ca_path({}) == "/cvmfs/grid.cern.ch/etc/grid-security/certificates"
 
 
@@ -226,3 +229,21 @@ def test_a_vomses_entry_whose_server_has_no_lsc_is_visible_as_such(tmp_path: Pat
     assert os.path.isdir(folder)  # what the old check asked
     assert lsc_names(stale) == ["lcg-voms.cern.ch.lsc"]  # what is actually needed
     assert not (folder / lsc_names(stale)[0]).exists()
+
+
+def test_a_bundle_kept_in_the_home_directory_is_found() -> None:
+    """An IGTF copy unpacked once is how a person has CAs without CVMFS."""
+    env = {"HOME": "/Users/someone"}
+    found = locations.grid_security_directories("certificates", env, workdir="/work")
+    local = [place.path for place in found if place.stage == "local"]
+    assert "/Users/someone/grid-ca/certificates" in local
+    assert "/Users/someone/.grid-security/certificates" in local
+
+
+def test_with_no_home_there_is_no_home_bundle() -> None:
+    """A session without a home has nothing to look under."""
+    assert locations.home_grid_security("certificates", {}) == []
+    assert "/grid-ca/certificates" not in [
+        place.path
+        for place in locations.grid_security_directories("certificates", {}, workdir="/work")
+    ]

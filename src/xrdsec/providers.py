@@ -78,6 +78,17 @@ class Provider:
 PROVIDERS: Mapping[str, Provider] = {
     provider.name: provider
     for provider in (
+        # LHCb's own DiracX: the issuer their clients use, and the one their CEs are
+        # configured to believe. The flow is an ordinary device flow; what a generic
+        # client cannot guess is LHCb's client id, which their client reads from its
+        # own configuration - so DIRACX_CLIENT_ID is honoured too (see `resolve`).
+        Provider(
+            name="lhcbdiracx",
+            issuer="https://lhcbdiracx.app.cern.ch/",
+            scope="openid vo:lhcb",
+            storage=False,
+            who="LHCb's DiracX - the issuer LHCb's own clients and CEs use",
+        ),
         Provider(
             name="lhcb",
             issuer="https://lhcb-auth.cern.ch/",
@@ -244,6 +255,12 @@ def _first(
     from_env = (env.get(variable) or "").strip()
     if from_env:
         return from_env, "env"
+    # LHCb's own clients name the same two things with DIRACX_* variables; a session
+    # set up for them should work here without being told again.
+    for alias in _ALIASES.get(variable, ()):
+        said = (env.get(alias) or "").strip()
+        if said:
+            return said, f"env:{alias}"
     if profile is not None:
         mine = getattr(profile, _FIELD[variable])
         if mine:
@@ -252,6 +269,12 @@ def _first(
         return fallback, "default"
     return "", ""
 
+
+#: Variables another client uses for the same thing, honoured after ours.
+_ALIASES = {
+    "WLCG_TOKEN_ISSUER": ("DIRACX_URL",),
+    "WLCG_CLIENT_ID": ("DIRACX_CLIENT_ID", "DIRACX_CLIENTID"),
+}
 
 #: Which profile field each variable falls back to.
 _FIELD = {"WLCG_TOKEN_ISSUER": "issuer", "WLCG_TOKEN_SCOPE": "scope"}

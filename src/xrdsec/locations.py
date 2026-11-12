@@ -41,6 +41,7 @@ __all__ = [
     "Location",
     "cwd",
     "grid_security_directories",
+    "home_grid_security",
     "proxy_candidates",
     "user_pairs",
 ]
@@ -93,6 +94,19 @@ class Location:
 WORKDIR: str | None = None
 
 
+def home_grid_security(kind: str, environ: Mapping[str, str] | None = None) -> list[str]:
+    """A ``grid-security/<kind>`` bundle kept under ``$HOME``, when there is a home.
+
+    ``~/grid-ca/<kind>`` and ``~/.grid-security/<kind>`` are where a person who
+    unpacked the WLCG trust anchors by hand tends to keep them.
+    """
+    env = os.environ if environ is None else environ
+    home = (env.get("HOME") or "").strip()
+    if not home:
+        return []
+    return [os.path.join(home, "grid-ca", kind), os.path.join(home, ".grid-security", kind)]
+
+
 def cwd(environ: Mapping[str, str] | None = None) -> str:
     """The working directory a ``cwd`` stage is relative to (``$PWD``, else :data:`WORKDIR`)."""
     named = ((os.environ if environ is None else environ).get("PWD") or "").strip()
@@ -114,7 +128,10 @@ def grid_security_directories(
     variable = _VARIABLES[kind]
     named = (env.get(variable) or "").strip()
     locations = [Location(named, "env", f"${variable}")] if named else []
+    # The machine's own directories, then a bundle a person keeps in their home:
+    # an IGTF copy unpacked once is the usual way to have CAs without CVMFS.
     locations += [Location(path, "local", path) for path in credentials.machine_grid_security(kind)]
+    locations += [Location(path, "local", path) for path in home_grid_security(kind, env)]
     locations += [Location(os.path.join(base, kind), "cvmfs", base) for base in CVMFS_GRID_SECURITY]
     here = workdir or cwd(env)
     locations.append(

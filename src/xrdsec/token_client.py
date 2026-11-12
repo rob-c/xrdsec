@@ -452,10 +452,15 @@ def device_authorization(
             "the device flow needs a client id: register a public client with the issuer",
             code="no_client",
         )
+    # RFC 8628 asks for these in a form body; DiracX (LHCb's own issuer) reads them
+    # from the *query string* and answers 422 without them. Sending both costs
+    # nothing and works at either kind of issuer.
+    asked = {"client_id": client_id, "scope": scope}
+    separator = "&" if urllib.parse.urlsplit(issuer.device_endpoint).query else "?"
     return _http(
-        issuer.device_endpoint,
+        issuer.device_endpoint + separator + urllib.parse.urlencode(asked),
         _context(None, ca_path),
-        form={"client_id": client_id, "scope": scope},
+        form=asked,
         timeout=timeout,
     )
 

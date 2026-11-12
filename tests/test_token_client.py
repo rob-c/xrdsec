@@ -832,3 +832,17 @@ def test_an_issuer_that_refuses_registration_is_quoted(issuer: Issuer) -> None:
     issuer.registration_status = 403
     with pytest.raises(token_client.TokenError, match="not for you"):
         token_client.register(issuer._issuer(), ca_path=issuer._ca())
+
+
+def test_the_device_request_also_carries_its_parameters_in_the_query(
+    issuer: Issuer,
+) -> None:
+    """RFC 8628 says a form body; DiracX reads the *query string* and 422s otherwise.
+
+    Sending both is what lets one client talk to both kinds of issuer.
+    """
+    token_client.device_authorization(
+        issuer._issuer(), "my-client", scope="openid vo:lhcb", ca_path=issuer._ca()
+    )
+    assert issuer.forms[-1] == {"client_id": "my-client", "scope": "openid vo:lhcb"}
+    assert issuer.paths[-1].startswith("/devicecode")

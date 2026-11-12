@@ -127,3 +127,29 @@ def test_a_profile_with_an_empty_field_falls_through_to_nothing():
     """A profile only speaks for the fields it has: an empty one is not an answer."""
     empty = providers.Provider(name="x", issuer="", scope="", storage=False, who="nobody")
     assert providers._first("", {}, "WLCG_TOKEN_ISSUER", empty, "") == ("", "")
+
+
+def test_lhcb_s_diracx_is_a_profile_of_its_own() -> None:
+    """LHCb's CEs believe their DiracX, so it has to be nameable."""
+    profile = providers.chosen("lhcbdiracx")
+    assert profile.issuer == "https://lhcbdiracx.app.cern.ch/"
+    assert "vo:lhcb" in profile.scope
+
+
+def test_the_variables_lhcb_s_own_clients_use_are_honoured() -> None:
+    """DIRACX_URL and DIRACX_CLIENT_ID mean what ours mean, so a session set up for
+    LHCb's client works here without being configured twice."""
+    said = providers.resolve(environ={"DIRACX_URL": "https://lhcbdiracx.app.cern.ch/"})
+    assert said.issuer == "https://lhcbdiracx.app.cern.ch/"
+    assert said.from_issuer == "env:DIRACX_URL"
+
+
+def test_our_own_variable_still_wins_over_the_alias() -> None:
+    """WLCG_TOKEN_ISSUER is ours: it beats a DIRACX_URL in the same session."""
+    said = providers.resolve(
+        environ={
+            "WLCG_TOKEN_ISSUER": "https://iam.example",
+            "DIRACX_URL": "https://lhcbdiracx.app.cern.ch/",
+        }
+    )
+    assert said.issuer == "https://iam.example"
