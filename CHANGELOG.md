@@ -3,7 +3,29 @@
 Notable user-visible changes are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.4.1] - Unreleased
+## [0.5.0] - 2026-11-12
+
+### Added
+
+- **`token_client.register()`**: RFC 7591 self-registration of a public client, so an
+  issuer that allows it (the WLCG reference IAM does) needs no hand-made client id;
+  `clientstore` keeps the id at `~/.config/xrdsec/token-clients.json` (`0600`), and a
+  `201 Created` is now success, as HTTP means.
+- **`providers`**: `lhcbdiracx` - LHCb's own DiracX, the issuer their clients use, with
+  the client id their front end publishes. `DIRACX_URL` and `DIRACX_CLIENT_ID` are
+  honoured exactly as `WLCG_TOKEN_*` are, so a session set up for LHCb's tools needs no
+  second configuration.
+- **Signing algorithm**: `algorithm_of()`, `PREFERRED_ALGORITHM` (`RS256`) and
+  `HTCONDOR_ALGORITHMS` (`RS256`, `ES256` - what `scitokens-cpp` can verify). A token
+  request asks for RS256 and the answer's own `alg` is reported, because an issuer may
+  ignore the request (DiracX signs Ed25519, which no CE can verify).
+- **A bundle in your home** is now a stage of the CA search (`~/grid-ca/<kind>`,
+  `~/.grid-security/<kind>`), for a machine whose CVMFS carries no trust anchors.
+
+### Fixed
+
+- Device-flow parameters go in the **query string** as well as the form body: DiracX
+  reads them there and answers `422` otherwise.
 
 ### Tested
 
